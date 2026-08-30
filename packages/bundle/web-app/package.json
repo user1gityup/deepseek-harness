@@ -66,6 +66,7 @@
     "@deepseek-ai/dsh-client-ui-goal": "workspace:^",
     "@deepseek-ai/dsh-client-ui-layout": "workspace:^",
     "@deepseek-ai/dsh-client-ui-model-selection": "workspace:^",
+    "@deepseek-ai/dsh-client-ui-openrouter-monitor": "workspace:^",
     "@deepseek-ai/dsh-client-ui-settings-models": "workspace:^",
     "@deepseek-ai/dsh-client-ui-settings-plugin-inventory": "workspace:^",
     "@deepseek-ai/dsh-client-ui-permission-presets": "workspace:^",
@@ -112,7 +113,8 @@
     "@deepseek-ai/dsh-workspace": "workspace:^",
     "@deepseek-ai/schemastery": "workspace:^",
     "commander": "^15.0.0",
-    "open": "^11.0.0"
+    "open": "^11.0.0",
+    "@deepseek-ai/dsh-client-ui-council-budget": "workspace:^"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis-plugin-loader": "workspace:^",

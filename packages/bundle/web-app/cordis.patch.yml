@@ -294,6 +294,12 @@
     - id: ui-trajectory
       name: '@deepseek-ai/dsh-client-ui-trajectory'
 
+    - id: ui-openrouter-monitor
+      name: '@deepseek-ai/dsh-client-ui-openrouter-monitor'
+
+    - id: ui-council-budget
+      name: '@deepseek-ai/dsh-client-ui-council-budget'
+
 # ── the agent plane moves behind agent presets ─────────────────────────────
 #
 # Every row below composes what ONE agent contributes to the host registries:

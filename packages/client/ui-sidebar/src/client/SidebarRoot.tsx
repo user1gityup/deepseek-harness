@@ -194,6 +194,10 @@ export function SidebarRoot({
           wide,
           expandSidebar: () => { if (collapsed) toggleSidebar() },
         })}
+        {/* Panels that belong with the browsing region rather than the foot. */}
+        <div className={css.regionActions}>
+          {renderSlot('sidebar.region.action', { wide })}
+        </div>
       </div>
 
       {/* Footer actions stack above Settings in both sidebar widths. */}

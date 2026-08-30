@@ -44,6 +44,12 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * package's 'sidebar' entry; each action receives only the column state.
      */
     'sidebar.footer.action': { kind: 'list'; scope: 'root'; owner: SidebarFooterActionOwnerProps }
+    /**
+     * Optional panels directly below the workspace and session tree, inside
+     * the browsing region. Shares the footer action's owner share because the
+     * only thing an occupant needs either place is the column width.
+     */
+    'sidebar.region.action': { kind: 'list'; scope: 'root'; owner: SidebarFooterActionOwnerProps }
   }
 }
 
@@ -114,5 +120,6 @@ export type SidebarRootComponentProps =
     | 'sidebar.workspaces'
     | 'sidebar.settings'
     | 'sidebar.footer.action'
+    | 'sidebar.region.action'
   >
   & SidebarRootInjected & PropsLocale<'sidebar'>

@@ -337,3 +337,13 @@
     animation: none;
   }
 }
+
+/* Actions parked directly under the workspace and session tree. */
+.regionActions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0 0;
+  margin-top: 4px;
+  border-top: 1px solid var(--ds-color-border, rgba(255, 255, 255, 0.08));
+}

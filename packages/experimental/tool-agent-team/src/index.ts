@@ -2,6 +2,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import type {} from '@deepseek-ai/dsh-subagent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { TeamTaskId } from '@deepseek-ai/dsh-experimental-agent-team'
 import type { TeamMemberView } from '@deepseek-ai/dsh-experimental-agent-team'
@@ -11,7 +12,7 @@ import type { InferValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 /** Cordis plugin name. */
 export const name = 'tool-agent-team'
 /** Services required by the Team tool plugin. */
-export const inject = ['agents', 'agentTeams', 'tools', 'systemPrompt']
+export const inject = ['agents', 'agentTeams', 'tools', 'systemPrompt', 'subagents']
 
 /** Tool routing configuration. */
 export interface Config {
@@ -171,8 +172,39 @@ function install(agent: Agent, ctx: Context, config: Required<Config>): () => vo
     }))
 
     register(scoped.tools.register(defineTool({
+      name: 'list_providers',
+      description:
+        'List the subagent providers a teammate can be spawned on. Call this before '
+        + 'spawn_teammate when choosing a provider, so the name is one that exists.',
+      parameters: {},
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            providers: { type: 'array', required: true, items: { type: 'string' } },
+            default: { type: 'string', required: true },
+          },
+        },
+        render: (_args: unknown, value: { providers: readonly string[]; default: string }) => [{
+          type: 'text' as const,
+          text: value.providers.length === 0
+            ? 'no subagent providers are registered'
+            : `providers: ${value.providers.join(', ')} (default: ${value.default})`,
+        }],
+      },
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async execute() {
+        return { providers: ctx.subagents.list(), default: config.freshProvider }
+      },
+    })))
+
+    register(scoped.tools.register(defineTool({
       name: 'spawn_teammate',
-      description: 'Create one named, durable teammate. Only the Team Lead may call this tool.',
+      description:
+        'Create one named, durable teammate. Only the Team Lead may call this tool. '
+        + 'Teammates may run on different providers: pick the one whose strengths match the '
+        + 'delegated work rather than spawning every teammate on the default.',
       parameters: {
         name: { type: 'string', required: true, description: 'Unique lower-kebab-case teammate name.' },
         description: { type: 'string', required: true, description: 'Short description of the delegated responsibility.' },
@@ -182,17 +214,39 @@ function install(agent: Agent, ctx: Context, config: Required<Config>): () => vo
           enum: ['fresh', 'fork'],
           description: 'fresh starts without Lead history; fork inherits completed Lead turns. Defaults to fresh.',
         },
+        provider: {
+          type: 'string',
+          description:
+            'Subagent provider to run this teammate on. Omit to use the configured default. '
+            + 'Call list_providers first to see what is registered — an unknown name is rejected.',
+        },
       },
       output: jsonOutput(SPAWN_VALUE_SCHEMA),
       async execute(args, exec) {
         const agent = callingAgent(exec.agent, 'spawn_teammate')
         const context = args.context ?? 'fresh'
+        // A per-teammate provider is what makes a team heterogeneous: the
+        // roster already stores `provider` per member and descriptor matching
+        // already keys off it, so only the choice was missing.
+        const fallback = context === 'fork' ? config.forkProvider : config.freshProvider
+        const provider = args.provider ?? fallback
+        if (args.provider !== undefined) {
+          // Fail here with the list rather than deep inside dispatch: a bad
+          // provider name is a recoverable authoring mistake, and the model
+          // can only correct it if it is told what the valid names are.
+          const known = ctx.subagents.list()
+          if (!known.includes(args.provider)) {
+            throw new Error(
+              `unknown subagent provider "${args.provider}" — registered providers: ${known.join(', ') || '(none)'}`,
+            )
+          }
+        }
         return await ctx.agentTeams.spawnTeammate(agent, {
           name: args.name,
           description: args.description,
           prompt: [{ type: 'text', text: args.prompt }],
           context,
-          provider: context === 'fork' ? config.forkProvider : config.freshProvider,
+          provider,
           signal: exec.signal,
         })
       },

@@ -127,6 +127,20 @@ export const DEFAULT_SEATS: readonly SeatConfig[] = [
  * unusable on the safe spawn path. A real executable has no such restriction,
  * and npm-installed agent CLIs ship one beside their shims.
  */
+/**
+ * Output cap sent with every OpenRouter request.
+ *
+ * Omitting `max_tokens` makes OpenRouter ask for the model's entire context
+ * window. A provider whose real ceiling is lower than the advertised context
+ * then rejects the call outright: Novita serves Kimi K2 with a 98304 cap
+ * against a 100352 context, so every uncapped request 400s before the model
+ * ever sees the prompt. An explicit cap is the difference between a seat that
+ * answers and a seat that never does.
+ *
+ * Set generously — no realistic council draft approaches this.
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 16_000
+
 const WINDOWS_EXTENSIONS = ['.exe', '.com', '.cmd', '.bat', ''] as const
 
 
@@ -331,6 +345,7 @@ export async function askOpenRouterSeat(
   apiKey: string | undefined,
   signal: AbortSignal | undefined,
   timeoutMs: number,
+  maxTokens: number = DEFAULT_MAX_OUTPUT_TOKENS,
 ): Promise<SeatReply> {
   const started = Date.now()
   if (apiKey === undefined || apiKey === '') {
@@ -349,7 +364,7 @@ export async function askOpenRouterSeat(
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }] }),
+      body: JSON.stringify({ model, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
       signal: composite,
     })
     if (!response.ok) {

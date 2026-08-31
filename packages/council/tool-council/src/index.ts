@@ -10,6 +10,9 @@
 // Type-only: pulls the settings service's Context merge (ctx.settings).
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { Context } from '@deepseek-ai/cordis'
+import { randomUUID } from 'node:crypto'
+import { judgeApproval } from './approval.ts'
+import type {} from '@deepseek-ai/dsh-web'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
@@ -35,7 +38,7 @@ export const name = 'tool-council'
  * Services required. `settings` carries the UI-writable namespace; the base
  * bundle always mounts a provider, so waiting for it is safe.
  */
-export const inject = ['tools', 'settings', 'systemPrompt', 'agents']
+export const inject = ['tools', 'settings', 'systemPrompt', 'agents', 'web']
 
 /** Preamble text used while council mode is on. */
 const COUNCIL_MODE_PROMPT = `COUNCIL MODE IS ON.
@@ -53,6 +56,13 @@ When the council returns, reproduce its full report field VERBATIM in your reply
 
 /** Settings namespace this plugin owns; the UI binds the same name. */
 export const COUNCIL_NAMESPACE = settingsNamespace('council')
+
+/**
+ * When the last real user message arrived. Held in memory, not settings: it is
+ * the half of approval the model cannot fake, and a restart should reset it to
+ * zero so a stale approval can never survive one.
+ */
+let lastUserTurnAt = 0
 
 /** One seat's user-facing configuration. */
 export interface SeatOverride {
@@ -109,6 +119,31 @@ export interface Config {
    * through the council rather than answering alone.
    */
   councilMode?: boolean
+  /**
+   * Plan the council issued and is holding at the approval gate. Flat scalars
+   * on purpose: a nested object schema gets an empty default materialised into
+   * it at load, and its required fields then fail validation before boot.
+   */
+  pendingPlanId?: string
+  /** The question that plan answers, shown on the Approve control. */
+  pendingPlanQuery?: string
+  /** The plan text itself, run verbatim once approved. */
+  pendingPlanText?: string
+  /** When the plan was issued, so a stale approval can be rejected. */
+  pendingPlanIssuedAt?: number
+  /**
+   * Plan id a human approved, written only by the Approve control. The model
+   * has no settings-writing tool, so this field cannot be forged by it.
+   */
+  approvedPlanId?: string
+  /** When the Approve control was pressed. */
+  approvedAt?: number
+  /**
+   * Skip the per-run approval gate. Off by default, and only a person can set
+   * it: the model has no settings-writing tool, so it cannot grant itself
+   * standing permission to spend.
+   */
+  autoApprove?: boolean
   /** Refuse to start when remaining OpenRouter credit falls below this. */
   minBalanceUsd?: number
   /** Monthly OpenRouter spend target used for pace warnings. */
@@ -157,6 +192,13 @@ export const Config: z<Config> = z.object({
   planOnly: z.boolean().default(true),
   plannerSeat: z.string(),
   councilMode: z.boolean().default(false),
+  pendingPlanId: z.string(),
+  pendingPlanQuery: z.string(),
+  pendingPlanText: z.string(),
+  pendingPlanIssuedAt: z.number(),
+  approvedPlanId: z.string(),
+  approvedAt: z.number(),
+  autoApprove: z.boolean().default(false),
   minBalanceUsd: z.number().default(0.5),
   monthlyBudgetUsd: z.number().default(20),
   weeklyClaudeTokens: z.number(),
@@ -230,7 +272,10 @@ export function resolveSeats(
       ...seat,
       enabled: override.enabled ?? seat.enabled,
       command: override.command ?? seat.command,
-      args: override.args ?? seat.args,
+      // An empty array is the schema's materialised default, not a caller
+      // asking for an argument-less command. Treat it as unset, or a seat
+      // toggled in the UI would spawn its command with no prompt at all.
+      args: override.args !== undefined && override.args.length > 0 ? override.args : seat.args,
       model: override.model ?? seat.model,
     }
   })
@@ -322,16 +367,17 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.on('agent/pre-step', async ({ signal: _signal }, next) => {
     const decision = await next()
     if (decision.kind === 'reject') return decision
-    if (live().councilMode !== true) {
-      console.info('[council-mode] pre-step: councilMode is OFF at read time')
-      return decision
+    // Stamp every user turn, council mode or not: the approval gate reads this
+    // to confirm a person spoke after pressing Approve.
+    if (decision.messages.some(message => message.source.kind === 'user')) {
+      lastUserTurnAt = Date.now()
     }
+    if (live().councilMode !== true) return decision
     const messages = decision.messages
     // Only a real user turn is worth escalating. A step entered with no direct
     // user message is the loop continuing its own work — wrapping that in a
     // council would spend eight calls on an intermediate step.
     const hasDirectUser = messages.some(message => message.source.kind === 'user')
-    console.info('[council-mode] pre-step: councilMode=on, messages=', messages.length, 'kinds=', messages.map(m => m.source.kind).join(','), 'directUser=', hasDirectUser)
     if (!hasDirectUser) return decision
     const last = messages.at(-1)
     if (last === undefined) return decision
@@ -341,6 +387,10 @@ export function apply(ctx: Context, config: Config = {}): void {
         ...messages,
         {
           ...last,
+          // A fresh id, or this shares one with the message it was cloned from.
+          // Two messages under one id make the conversation assembler see two
+          // starts for a single context, and the whole history fails to load.
+          id: randomUUID() as typeof last.id,
           content: [{ type: 'text' as const, text: COUNCIL_MODE_DIRECTIVE }],
         },
       ],
@@ -446,10 +496,33 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
     async execute(args, exec) {
       const apiKey = resolveOpenRouterKey({ variable: config.apiKeyEnv })
-      // An explicit plan means the direction is already settled, so planOnly
-      // must not re-gate it; that would make an approved plan unrunnable.
-      const hasPlan = typeof args.plan === 'string' && args.plan !== ''
-      const planOnly = hasPlan ? false : (args.planOnly ?? config.planOnly ?? true)
+      // A `plan` argument is NOT evidence of approval: the model is the caller
+      // and can write one itself, which is exactly how an unapproved run got
+      // through before. Approval is judged only from state the model cannot
+      // write — the Approve button, and a user turn after it.
+      const settingsNow = live()
+      const approval = judgeApproval({
+        pendingPlan: settingsNow.pendingPlanId === undefined || settingsNow.pendingPlanId === '' ? undefined : {
+          id: settingsNow.pendingPlanId,
+          query: settingsNow.pendingPlanQuery ?? '',
+          issuedAt: settingsNow.pendingPlanIssuedAt ?? 0,
+        },
+        approvedPlanId: settingsNow.approvedPlanId,
+        approvedAt: settingsNow.approvedAt,
+        lastUserTurnAt,
+      })
+      // Stop at the gate unless approval is complete. Every caller-supplied
+      // flag that could weaken the gate is ignored while unapproved: the model
+      // reached for `planOnly`, then for `skipPlan`, and would reach for the
+      // next one. Only the approval decides.
+      // Auto-approve is standing permission from the user, so the run does
+      // not stop at the gate. It still plans first: the plan is what makes the
+      // estimate meaningful, and it costs one cheap call.
+      const autoApproved = settingsNow.autoApprove === true
+      const planOnly = autoApproved ? false : !approval.allowed
+      const skipPlan = (autoApproved || approval.allowed)
+        ? (args.skipPlan ?? config.planning === false)
+        : false
       const wantsPlainEarly = args.noColor === true || config.noColor === true
       const livePalette = detectPalette({
         noColor: wantsPlainEarly,
@@ -460,6 +533,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       const active = currentSeats()
       const result = await runCouncil({
         memory,
+        // Tool-less seats get one shared search instead of each inventing
+        // citations. The seam's router prefers a subscription route, so this
+        // is normally free.
+        web: ctx.web,
         onEvent: (event) => {
           // Live line per seat: a full council can run for minutes, and silence
           // is indistinguishable from a hang.
@@ -469,14 +546,23 @@ export function apply(ctx: Context, config: Config = {}): void {
           const line = `  [${event.round}] ${event.name} ${String(event.ms)}ms${cost}${running}${status}`
           process.stdout.write(`${event.ok ? livePalette.seat(event.seat, line) : livePalette.failure(line)}\n`)
         },
-        query: args.query,
+        // Once approved, run the question the plan was written for. The
+        // follow-up turn that satisfies the verbal factor is usually just
+        // "go", and passing that as the query would answer the wrong thing.
+        query: !autoApproved && approval.allowed && settingsNow.pendingPlanQuery !== undefined && settingsNow.pendingPlanQuery !== ''
+          ? settingsNow.pendingPlanQuery
+          : args.query,
         seats: active,
         apiKey,
         signal: exec.signal,
         timeoutMs,
         sequential: args.sequential ?? config.sequential,
-        ...(hasPlan ? { plan: args.plan } : {}),
-        skipPlan: args.skipPlan ?? config.planning === false,
+        // The approved plan comes from stored state, not from the caller's
+        // argument. A model-supplied plan is discarded outright.
+        ...(!autoApproved && approval.allowed && settingsNow.pendingPlanText !== undefined
+          ? { plan: settingsNow.pendingPlanText }
+          : {}),
+        skipPlan,
         planOnly,
         budget: {
           minBalanceUsd: config.minBalanceUsd ?? 0.5,
@@ -488,12 +574,43 @@ export function apply(ctx: Context, config: Config = {}): void {
       // The estimate is only meaningful at the planning gate: past that point
       // the money is already committed.
       let estimated = result
-      if (result.phase === 'plan' && result.plan !== undefined && result.plan !== '') {
+      // Issue the plan for approval, or retire the approval that was just
+      // spent. Both write settings, the one channel the model cannot reach.
+      if (result.phase === 'plan' && !autoApproved) {
+        await ctx.settings?.update(COUNCIL_NAMESPACE, {
+          pendingPlanId: randomUUID(),
+          pendingPlanQuery: args.query,
+          pendingPlanText: result.plan ?? '',
+          pendingPlanIssuedAt: Date.now(),
+          // A newly issued plan voids any earlier approval outright.
+          approvedPlanId: '',
+          approvedAt: 0,
+        } as never)
+      } else {
+        // The run happened; the approval must not be reusable for the next one.
+        // Retire with empty sentinels, not `undefined`: a settings update
+        // treats undefined as "leave unchanged", so the spent approval
+        // survived and the NEXT council run needed no approval at all.
+        // Every run must be approved on its own.
+        await ctx.settings?.update(COUNCIL_NAMESPACE, {
+          pendingPlanId: '',
+          pendingPlanQuery: '',
+          pendingPlanText: '',
+          pendingPlanIssuedAt: 0,
+          approvedPlanId: '',
+          approvedAt: 0,
+        } as never)
+      }
+
+      // The estimate is most useful precisely when planning went wrong, so it
+      // is attached whenever the run stopped at the gate — plan or no plan.
+      if (result.phase === 'plan') {
         const [pricing, balance] = await Promise.all([
           fetchModelPricing(exec.signal),
           readBalance(apiKey, exec.signal),
         ])
-        const scale = parsePlanScale(result.plan)
+        // With no plan to size the job, fall back to the estimator's own default.
+        const scale = parsePlanScale(result.plan ?? '')
         const week = quotaReading(readClaudeUsage(startOfWeek()), config.weeklyClaudeTokens)
         const estimate = estimateRun(active, scale, pricing, [], {
           remainingUsd: balance?.remaining,
@@ -502,7 +619,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           weeklyClaudeTokens: config.weeklyClaudeTokens,
           weeklyClaudeUsed: week.tokens,
         })
-        estimated = { ...result, estimate }
+        estimated = { ...result, estimate, approval }
       }
 
       const wantsPlain = args.noColor === true || config.noColor === true

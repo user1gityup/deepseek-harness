@@ -11,6 +11,10 @@ import type { BudgetDecision, BudgetLimits } from './budget.ts'
 import { judgeBudget, readBalance, spendBetween } from './budget.ts'
 import type { SeatId } from './colors.ts'
 import type { SeatConfig, SeatReply } from './seats.ts'
+import { auditDraft } from './verify.ts'
+import type { DraftAudit, FetchSeam } from './verify.ts'
+import { gatherEvidence } from './evidence.ts'
+import type { Evidence, SearchSeam } from './evidence.ts'
 import { askSeat } from './seats.ts'
 
 /** One seat's review of the drafts, with its vote. */
@@ -81,6 +85,24 @@ export interface CouncilEvent {
 export interface CouncilResult {
   /** Which phase this run stopped at. */
   readonly phase: CouncilPhase
+  /**
+   * Sources retrieved and shared with every seat before drafting. Empty when
+   * no tool-less seat was active, or when retrieval failed — the report says
+   * which, so an ungrounded answer is never mistaken for a grounded one.
+   */
+  readonly evidenceUrls?: readonly string[] | undefined
+  /** Why the spending gate stayed shut, when it did. */
+  readonly approval?: { readonly allowed: boolean; readonly reason: string; readonly missing?: 'trigger' | 'verbal' | 'plan' | 'expired' | undefined } | undefined
+  /**
+   * Per-draft citation audit. Present whenever drafts ran, so the report can
+   * show which answers were actually sourced and which only looked sourced.
+   */
+  readonly audits?: readonly DraftAudit[] | undefined
+  /**
+   * Planner seats that failed before one succeeded. Reported rather than
+   * swallowed: a plan written by the third choice is worth knowing about.
+   */
+  readonly planFailures?: readonly { readonly seat: SeatId; readonly error: string }[] | undefined
   /** The agreed approach, when a planning round ran or one was supplied. */
   readonly plan?: string | undefined
   /** The seat that produced the plan, when the council generated it. */
@@ -138,6 +160,12 @@ export interface RunOptions {
    * ones commit to it.
    */
   readonly planOnly?: boolean | undefined
+  /**
+   * Web seam used to retrieve one shared evidence block before drafting.
+   * Omitted, or failing, simply means seats are told no evidence was
+   * retrieved — which is still far better than leaving them to guess.
+   */
+  readonly web?: (SearchSeam & Partial<FetchSeam>) | undefined
 }
 
 /** Prompt for the planning round. */
@@ -160,17 +188,43 @@ QUESTION:
 ${query}`
 }
 
+/**
+ * What a seat is told about its own tools.
+ *
+ * A seat with no tools that is asked to be "specific and concrete" about a
+ * current fact will often emit tool-call syntax it cannot execute and then
+ * present training data as verified. Saying plainly that the tools are absent
+ * costs a few tokens and removes the incentive entirely.
+ */
+function toolNotice(toolless: boolean, hasEvidence: boolean): string {
+  if (!toolless) return ''
+  const source = hasEvidence
+    ? 'Work from the EVIDENCE above and your own knowledge.'
+    : 'No evidence could be retrieved for this question, so work from your own knowledge alone.'
+  return `
+
+YOUR TOOLS: you have none in this call. No search, no page fetch, no filesystem. ${source} Do not emit tool-call syntax of any kind — it will not run, and text shaped like a tool call is treated as a fabricated result. Mark any claim you cannot support from the evidence as [unverified], and say plainly when your knowledge may be out of date.`
+}
+
 /** Prompt for the drafting round, optionally constrained by an agreed plan. */
-function draftPrompt(query: string, plan: string | undefined): string {
+function draftPrompt(
+  query: string,
+  plan: string | undefined,
+  evidence: Evidence | undefined,
+  toolless: boolean,
+): string {
   const guidance = plan === undefined || plan === ''
     ? ''
     : `
 
 The council agreed this approach. Follow it unless it is plainly wrong, and say so if it is:
 ${plan}`
+  const facts = evidence === undefined ? '' : `
+
+${evidence.block}`
   return `You are one member of a council answering a user's question.
 
-Give your best complete answer. Be specific and concrete. Do not mention that you are part of a council, and do not address the other members.${guidance}
+Give your best complete answer. Be specific and concrete. Do not mention that you are part of a council, and do not address the other members.${facts}${toolNotice(toolless, evidence !== undefined)}${guidance}
 
 USER QUESTION:
 ${query}`
@@ -196,6 +250,27 @@ export function choosePlanner(
     if (named !== undefined) return named
   }
   return enabled.find(seat => seat.transport === 'openrouter') ?? enabled[0]
+}
+
+/**
+ * Every seat that could plan, best first.
+ *
+ * The planner is one cheap call that gates an expensive round, so its failure
+ * used to end the run: no plan meant no estimate and no drafts, and the seats
+ * that were working never got to speak. Ordering the candidates lets a
+ * transient failure on the cheapest seat fall through to the next one.
+ * @param seats - the active roster.
+ * @param preferred - explicitly configured planner seat id.
+ * @returns candidate planners in the order they should be tried.
+ */
+export function plannerOrder(
+  seats: readonly SeatConfig[],
+  preferred: string | undefined,
+): readonly SeatConfig[] {
+  const enabled = seats.filter(seat => seat.enabled)
+  const first = choosePlanner(enabled, preferred)
+  if (first === undefined) return []
+  return [first, ...enabled.filter(seat => seat.id !== first.id)]
 }
 
 /**
@@ -332,7 +407,11 @@ async function fanOut<T>(tasks: readonly (() => Promise<T>)[], sequential: boole
  * @param drafts - the drafts under review.
  * @returns the verdict, including whether it was tied.
  */
-export function tally(reviews: readonly SeatReview[], drafts: readonly SeatReply[]): Verdict {
+export function tally(
+  reviews: readonly SeatReview[],
+  drafts: readonly SeatReply[],
+  penalties: ReadonlyMap<SeatId, number> = new Map(),
+): Verdict {
   const scores = new Map<SeatId, number>()
   const counts = new Map<SeatId, number>()
   const peerScores = new Map<SeatId, number>()
@@ -352,6 +431,18 @@ export function tally(reviews: readonly SeatReview[], drafts: readonly SeatReply
     counts.set(vote, (counts.get(vote) ?? 0) + 1)
     if (!isSelf) peerScores.set(vote, (peerScores.get(vote) ?? 0) + review.confidence)
   }
+  // A fabricated citation has to cost something here, or fluency keeps
+  // winning. Scale both totals so the penalty survives whichever branch
+  // below decides the winner.
+  for (const [seat, penalty] of penalties) {
+    if (penalty <= 0) continue
+    const factor = Math.max(0, 1 - penalty)
+    const score = scores.get(seat)
+    if (score !== undefined) scores.set(seat, score * factor)
+    const peer = peerScores.get(seat)
+    if (peer !== undefined) peerScores.set(seat, peer * factor)
+  }
+
   const usable = drafts.filter(draft => draft.error === undefined && draft.text !== '')
   if (scores.size === 0) {
     if (usable.length === 1) {
@@ -436,9 +527,9 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
   // ── planning round ──
   let plan = options.plan
   let planSeat: SeatId | undefined
+  const planFailures: { seat: SeatId; error: string }[] = []
   if (plan === undefined && options.skipPlan !== true) {
-    const planner = choosePlanner(active, options.plannerSeat)
-    if (planner !== undefined) {
+    for (const planner of plannerOrder(active, options.plannerSeat)) {
       const reply = await reporting(
         planner,
         'plan',
@@ -449,34 +540,49 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
       if (reply.error === undefined && reply.text !== '') {
         plan = reply.text
         planSeat = planner.id
+        break
       }
-      // A failed planning call is not fatal: drafting without a plan is the
-      // pre-planning behaviour, which is still a useful answer.
-    }
-    if (options.planOnly === true) {
-      return {
-        phase: 'plan',
-        plan,
-        planSeat,
-        budget,
-        estimate: options.estimate,
-        spentUsd: spendBetween(before, await readBalance(options.apiKey, options.signal)),
-        query: options.query,
-        seats: active,
-        drafts: [],
-        reviews: [],
-        verdict: empty,
-        answer: '',
-      }
+      // Record it, then let the next seat try. A planner that cannot answer
+      // must not silently cost the run its drafting round.
+      planFailures.push({ seat: planner.id, error: reply.error ?? 'empty plan' })
     }
   }
 
+  // The approval gate applies whether or not a planning round ran. It used
+  // to sit inside the `skipPlan` guard, so a caller passing skipPlan:true
+  // skipped the gate along with the planning round and went straight to
+  // spending — which is exactly what the model did.
+  if (options.planOnly === true) {
+    return {
+      phase: 'plan',
+      plan,
+      planSeat,
+      ...planFailures.length === 0 ? {} : { planFailures },
+      budget,
+      estimate: options.estimate,
+      spentUsd: spendBetween(before, await readBalance(options.apiKey, options.signal)),
+      query: options.query,
+      seats: active,
+      drafts: [],
+      reviews: [],
+      verdict: empty,
+      answer: '',
+    }
+  }
+
+  // One search, shared by every seat. Retrieved after the planning gate so a
+  // run the user abandons at the plan never pays for it, and before the drafts
+  // so all seats reason over the same sources rather than their own memories.
+  const needsTools = active.some(seat => seat.transport === 'openrouter')
+  const evidence = needsTools
+    ? await gatherEvidence(options.web, options.query, options.signal)
+    : undefined
   const drafts = await fanOut(
     active.map(seat => () =>
       reporting(
         seat,
         'draft',
-        askSeat(seat, draftPrompt(options.query, plan), options.apiKey, options.signal, options.timeoutMs, options.memory),
+        askSeat(seat, draftPrompt(options.query, plan, evidence, seat.transport === 'openrouter'), options.apiKey, options.signal, options.timeoutMs, options.memory),
         spend,
         emit,
       )),
@@ -487,6 +593,8 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
   if (usable.length === 0) {
     return {
       phase: 'full',
+      ...planFailures.length === 0 ? {} : { planFailures },
+      ...evidence === undefined ? {} : { evidenceUrls: evidence.urls },
       plan,
       planSeat,
       budget,
@@ -528,12 +636,30 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
       sequential,
     ))
 
-  const verdict = tally(reviews, drafts)
+  // Audit before tallying: the penalty has to be in hand when the winner is
+  // chosen, not attached to the report afterwards.
+  const fetchSeam = typeof options.web?.fetch === 'function' ? options.web as FetchSeam : undefined
+  const audits = await Promise.all(
+    drafts
+      .filter(draft => draft.error === undefined && draft.text !== '')
+      .map(async draft => auditDraft(
+        draft.seat,
+        draft.text,
+        evidence?.urls ?? [],
+        fetchSeam,
+        options.signal,
+      )),
+  )
+  const penalties = new Map(audits.map(audit => [audit.seat, audit.penalty]))
+  const verdict = tally(reviews, drafts, penalties)
   const winning = verdict.winner === undefined
     ? undefined
     : drafts.find(draft => draft.seat === verdict.winner)
   return {
     phase: 'full',
+    ...planFailures.length === 0 ? {} : { planFailures },
+    ...evidence === undefined ? {} : { evidenceUrls: evidence.urls },
+    audits,
     plan,
     planSeat,
     budget,

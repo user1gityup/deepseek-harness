@@ -3902,6 +3902,9 @@ importers:
 
   packages/council/tool-council:
     dependencies:
+      '@deepseek-ai/dsh-web':
+        specifier: workspace:^
+        version: link:../../web/web
       '@deepseek-ai/schemastery':
         specifier: link:../../../vendor/schemastery
         version: link:../../../vendor/schemastery

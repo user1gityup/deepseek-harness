@@ -15,6 +15,7 @@
     { "path": "../../core/system-prompt" },
     { "path": "../../core/tools" },
     { "path": "../agent-team" },
+    { "path": "../../subagent/subagent" },
     { "path": "../../runtime-diagnostics/invariants" }
   ]
 }

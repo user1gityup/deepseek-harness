@@ -143,7 +143,6 @@ describe('planner fallback', () => {
 
 describe('blocked is not dead', () => {
   const blocking = (code: number): FetchSeam => ({
-    // eslint-disable-next-line @typescript-eslint/require-await
     async fetch() { return { statusCode: code } },
   })
 

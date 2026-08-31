@@ -193,7 +193,6 @@ function install(agent: Agent, ctx: Context, config: Required<Config>): () => vo
             : `providers: ${value.providers.join(', ')} (default: ${value.default})`,
         }],
       },
-      // eslint-disable-next-line @typescript-eslint/require-await
       async execute() {
         return { providers: ctx.subagents.list(), default: config.freshProvider }
       },

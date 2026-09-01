@@ -26,30 +26,42 @@ import css from './CouncilCallView.module.css'
 /** Props for the council tool view. */
 export type CouncilCallViewProps = ToolCallViewProps & { settings: SettingsFace }
 
-/** Result fields this view reads off the settled call. */
-interface CouncilValue {
-  readonly report?: unknown
-  readonly phase?: unknown
-  readonly planId?: unknown
-  readonly query?: unknown
+/** What this view could read off a settled call. */
+interface CallContent {
+  /** Report text with the marker removed. */
+  readonly report: string
+  /** Plan this call issued, when it issued one. */
+  readonly planId?: string | undefined
 }
 
+/** Marker the host appends so a call can name the plan it issued. */
+const PLAN_MARKER = /<!--council-plan:([0-9a-f-]{16,})-->/i
+
 /**
- * Pull the council's result value off a settled tool call.
+ * Read the council's report and plan id off a settled call.
  *
- * Tolerant by design: a running call has no value yet, and a shape that has
- * moved on should degrade to "no report" rather than throw inside a renderer.
+ * A tool result node carries rendered `content` blocks and a closed union of
+ * card shapes — there is no structured payload — so the plan id travels as a
+ * marker inside the text and is stripped here before display.
  * @param block - the running or settled call node.
- * @returns the result value, or undefined while it has none.
+ * @returns the report and plan id, or undefined while there is no content.
  */
-function readValue(block: unknown): CouncilValue | undefined {
+function readCall(block: unknown): CallContent | undefined {
   if (typeof block !== 'object' || block === null) return undefined
-  const row = block as Record<string, unknown>
-  const candidates = [row['value'], row['result'], row['output']]
-  for (const candidate of candidates) {
-    if (typeof candidate === 'object' && candidate !== null) return candidate as CouncilValue
-  }
-  return undefined
+  const content = (block as { content?: unknown }).content
+  if (!Array.isArray(content)) return undefined
+  const text = content
+    .map((entry) => {
+      if (typeof entry !== 'object' || entry === null) return ''
+      const row = entry as { type?: unknown; text?: unknown }
+      return row.type === 'text' && typeof row.text === 'string' ? row.text : ''
+    })
+    .filter(part => part !== '')
+    .join(String.fromCharCode(10))
+  if (text === '') return undefined
+  const found = PLAN_MARKER.exec(text)
+  const report = text.replace(PLAN_MARKER, '').trimEnd()
+  return found === null ? { report } : { report, planId: found[1] }
 }
 
 /**
@@ -62,21 +74,27 @@ export function CouncilCallView({ block, settings }: CouncilCallViewProps): JSX.
     fn => settings.subscribe(fn),
     () => settings.getSnapshot(),
   )
-  const value = readValue(block)
-  const report = typeof value?.report === 'string' ? value.report : ''
-  if (report === '') return null
+  const parsed = readCall(block)
+  if (parsed === undefined) return null
+  const report = parsed.report
 
   const section = snapshot.value
-  const callPlanId = typeof value?.planId === 'string' ? value.planId : undefined
+  const callPlanId = parsed.planId
   const heldId = section?.['pendingPlanId']
   const approvedId = section?.['approvedPlanId']
   const autoApprove = section?.['autoApprove'] === true
 
   // Only the call whose plan is still the held one may be approved. An older
   // call keeps its report but says plainly that its plan has been replaced.
+  const hasHeld = typeof heldId === 'string' && heldId !== ''
   const isHeld = callPlanId !== undefined && callPlanId !== '' && heldId === callPlanId
   const isApproved = isHeld && approvedId === callPlanId
-  const isSuperseded = callPlanId !== undefined && callPlanId !== '' && !isHeld
+  // Superseded means a DIFFERENT plan is held. No plan held at all is a
+  // different fault entirely — the write never landed — and calling that
+  // "superseded" would send the reader hunting for a newer plan that does
+  // not exist.
+  const isSuperseded = callPlanId !== undefined && callPlanId !== '' && hasHeld && !isHeld
+  const isUnrecorded = callPlanId !== undefined && callPlanId !== '' && !hasHeld
 
   return (
     <div className={css.view}>
@@ -120,6 +138,10 @@ export function CouncilCallView({ block, settings }: CouncilCallViewProps): JSX.
       {isSuperseded
         ? <p className={css.note}>{t_('superseded')}</p>
         : null}
+
+      {isUnrecorded
+        ? <p className={css.note}>{t_('unrecorded')}</p>
+        : null}
     </div>
   )
 }
@@ -132,13 +154,14 @@ export function CouncilCallView({ block, settings }: CouncilCallViewProps): JSX.
  * @param key - which string.
  * @returns the English text.
  */
-function t_(key: 'needsApproval' | 'approve' | 'discard' | 'approvedSendMessage' | 'superseded' | 'auto'): string {
+function t_(key: 'needsApproval' | 'approve' | 'discard' | 'approvedSendMessage' | 'superseded' | 'unrecorded' | 'auto'): string {
   const strings: Record<string, string> = {
     needsApproval: 'This plan needs your approval before the council spends anything.',
     approve: 'Approve',
     discard: 'Discard',
     approvedSendMessage: 'Approved. Send any message to run the council on this plan.',
     superseded: 'This plan has been replaced by a newer one and can no longer be approved.',
+    unrecorded: 'This plan was never recorded, so it cannot be approved. The council could not write to settings — the report above says why.',
     auto: 'Auto-approve is on, so this plan did not wait.',
   }
   return strings[key] ?? key

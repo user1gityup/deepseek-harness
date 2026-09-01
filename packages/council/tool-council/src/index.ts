@@ -535,8 +535,17 @@ export function apply(ctx: Context, config: Config = {}): void {
       schema: COUNCIL_VALUE_SCHEMA,
       // Show every draft, review, and vote in the main window rather than a
       // summary: the point of a council is seeing the disagreement.
-      render: (_args: unknown, value: InferValue<typeof COUNCIL_VALUE_SCHEMA>) =>
-        [{ type: 'text' as const, text: value.report }],
+      render: (_args: unknown, value: InferValue<typeof COUNCIL_VALUE_SCHEMA>) => {
+        // The client's tool view needs to know WHICH plan this call issued, so
+        // the Approve control binds to this call rather than to whatever plan
+        // happens to be current. The result node carries only rendered content
+        // and a closed union of card shapes — there is no structured payload
+        // to put it in — so it travels as a marker the view parses and strips.
+        const marker = value.planId === undefined || value.planId === ''
+          ? ''
+          : `${String.fromCharCode(10)}${String.fromCharCode(10)}<!--council-plan:${value.planId}-->`
+        return [{ type: 'text' as const, text: `${value.report}${marker}` }]
+      },
     },
     async execute(args, exec) {
       const apiKey = resolveOpenRouterKey({ variable: config.apiKeyEnv })

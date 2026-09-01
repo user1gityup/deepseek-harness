@@ -351,11 +351,16 @@
     # ask before writing. That is the property that makes a swarm safe to run
     # at all, and it is why these are mounted rather than the Lead simply being
     # escalated.
+    # Disabled pending the execution-approval gate. Mounting these exposes
+    # spawn_teammate to the model, which could then create workers without
+    # being asked — the tools stay built and tested, but out of reach.
     - id: agent-team
       name: '@deepseek-ai/dsh-experimental-agent-team'
+      disabled: true
 
     - id: tool-agent-team
       name: '@deepseek-ai/dsh-experimental-tool-agent-team'
+      disabled: true
       config:
         # Teammates default to the in-process spawn provider; the Lead may name
         # a different one per teammate via spawn_teammate's `provider`.
@@ -369,6 +374,7 @@
     # decision someone has actually made.
     - id: subagent-claude-code
       name: '@deepseek-ai/dsh-subagent-claude-code'
+      disabled: true
       config:
         providerName: claude-code
         permissionMode: dontAsk

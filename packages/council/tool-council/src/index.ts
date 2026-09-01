@@ -11,7 +11,7 @@
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { Context } from '@deepseek-ai/cordis'
 import { randomUUID } from 'node:crypto'
-import { judgeApproval } from './approval.ts'
+import { judgeApproval, planExpired } from './approval.ts'
 import type {} from '@deepseek-ai/dsh-web'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -52,7 +52,12 @@ const COUNCIL_MODE_DIRECTIVE = `[council mode] Handle the request above with the
 
 The only exception is a trivial exchange (an acknowledgement, a one-word clarification, or a question about what you just said), which you may answer directly.
 
-When the council returns, reproduce its full report field VERBATIM in your reply before adding anything of your own. The report is already formatted for the user: it shows each seat's answer under its own coloured marker, then the votes, then the collective answer. Do not summarise it, shorten it, or describe it — paste it in full.`
+WHEN THE COUNCIL RETURNS, TWO RULES ARE ABSOLUTE:
+
+1. Reproduce the \`report\` field VERBATIM, in full, before anything of your own. It already contains every seat's answer under its own coloured marker, the votes, and the collective answer. Do NOT summarise it, shorten it, quote only the winner, or describe what it says. The user reads the report, not your account of it. Dropping a losing seat's contribution destroys the point of running a council.
+
+2. If the report stops at a plan, STOP. Do not call the council again. Do not reword the question and retry. Only the user can approve, using the Approve control; another call cannot approve and cannot improve the plan — it only spends money and replaces the plan they were about to approve.
+`
 
 /** Settings namespace this plugin owns; the UI binds the same name. */
 export const COUNCIL_NAMESPACE = settingsNamespace('council')
@@ -547,6 +552,45 @@ export function apply(ctx: Context, config: Config = {}): void {
       // flag that could weaken the gate is ignored while unapproved: the model
       // reached for `planOnly`, then for `skipPlan`, and would reach for the
       // next one. Only the approval decides.
+      // A plan is already held and unapproved: return it rather than running
+      // another planning round. Without this, a model that re-calls the tool
+      // with a reworded query pays for a fresh plan every time and resets the
+      // gate, so the run can never reach drafting no matter how many rounds
+      // are bought.
+      const heldId = settingsNow.pendingPlanId
+      const heldUnapproved = heldId !== undefined && heldId !== ''
+        && settingsNow.approvedPlanId !== heldId
+        && settingsNow.autoApprove !== true
+        && !planExpired(
+          { id: heldId, query: settingsNow.pendingPlanQuery ?? '', issuedAt: settingsNow.pendingPlanIssuedAt ?? 0 },
+          Date.now(),
+        )
+      if (heldUnapproved) {
+        const waiting = [
+          '## Council — plan already waiting',
+          '',
+          '> **!** A plan is already held at the approval gate. Nothing new was run and nothing was spent.',
+          '',
+          `**Question:** ${settingsNow.pendingPlanQuery ?? '(unknown)'}`,
+          '',
+          settingsNow.pendingPlanText ?? '',
+          '',
+          '_Press **Approve** below the composer, then send any message. Calling the council again only re-plans; it cannot approve._',
+        ].join(String.fromCharCode(10))
+        return {
+          report: waiting,
+          phase: 'plan',
+          query: settingsNow.pendingPlanQuery ?? args.query,
+          answer: '',
+          method: 'none',
+          tied: false,
+          failures: [],
+          ...(settingsNow.pendingPlanText === undefined || settingsNow.pendingPlanText === ''
+            ? {}
+            : { plan: settingsNow.pendingPlanText }),
+        }
+      }
+
       // Auto-approve is standing permission from the user, so the run does
       // not stop at the gate. It still plans first: the plan is what makes the
       // estimate meaningful, and it costs one cheap call.

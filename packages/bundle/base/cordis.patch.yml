@@ -343,6 +343,36 @@
     - id: tool-subagent-report
       name: '@deepseek-ai/dsh-tool-subagent-report'
 
+    # ── swarm: durable named teammates with a shared task board ──
+    #
+    # Mounted so work can be split across workers instead of answered by one
+    # agent. Teammates each get their OWN session, so none of them inherits the
+    # Lead's permission preset: each starts at the composition default and must
+    # ask before writing. That is the property that makes a swarm safe to run
+    # at all, and it is why these are mounted rather than the Lead simply being
+    # escalated.
+    - id: agent-team
+      name: '@deepseek-ai/dsh-experimental-agent-team'
+
+    - id: tool-agent-team
+      name: '@deepseek-ai/dsh-experimental-tool-agent-team'
+      config:
+        # Teammates default to the in-process spawn provider; the Lead may name
+        # a different one per teammate via spawn_teammate's `provider`.
+        freshProvider: spawn
+        forkProvider: fork
+
+    # A Claude Code worker, billed to the subscription rather than per token.
+    # `dontAsk` is deliberate: this worker reads, analyses, and reports, but
+    # does not edit. Widening it to `acceptEdits` grants unattended writes to
+    # every teammate that runs on it, so it stays closed until that is a
+    # decision someone has actually made.
+    - id: subagent-claude-code
+      name: '@deepseek-ai/dsh-subagent-claude-code'
+      config:
+        providerName: claude-code
+        permissionMode: dontAsk
+
     - id: workflow-worker-thread
       name: '@deepseek-ai/dsh-workflow-worker-thread'
       config:

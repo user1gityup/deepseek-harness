@@ -103,6 +103,12 @@ export interface CouncilResult {
    * swallowed: a plan written by the third choice is worth knowing about.
    */
   readonly planFailures?: readonly { readonly seat: SeatId; readonly error: string }[] | undefined
+  /** Competing plans, when the council voted on the plan. */
+  readonly planDrafts?: readonly SeatReply[] | undefined
+  /** Votes cast on those plans. */
+  readonly planReviews?: readonly SeatReview[] | undefined
+  /** How the winning plan won. */
+  readonly planVerdict?: Verdict | undefined
   /** The agreed approach, when a planning round ran or one was supplied. */
   readonly plan?: string | undefined
   /** The seat that produced the plan, when the council generated it. */
@@ -138,6 +144,14 @@ export interface RunOptions {
   readonly plan?: string | undefined
   /** Seat id that writes the plan. Defaults to the cheapest configured seat. */
   readonly plannerSeat?: string | undefined
+  /**
+   * How the plan is produced. `single` asks one cheap seat; `council` has every
+   * seat propose a plan and the council vote on which to follow.
+   *
+   * The plan is the decision every later round inherits, so resting it on one
+   * seat makes the cheapest seat the most influential one in the run.
+   */
+  readonly planMode?: 'single' | 'council' | undefined
   /** Skip planning entirely and go straight to drafting. */
   readonly skipPlan?: boolean | undefined
   /** Budget thresholds checked before any call is made. */
@@ -528,6 +542,70 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
   let plan = options.plan
   let planSeat: SeatId | undefined
   const planFailures: { seat: SeatId; error: string }[] = []
+  let planDrafts: SeatReply[] = []
+  let planReviews: SeatReview[] = []
+  let planVerdict: Verdict | undefined
+  if (plan === undefined && options.skipPlan !== true && options.planMode === 'council' && active.length > 1) {
+    // Every seat proposes a plan, then the council votes on which to follow.
+    // Costs a full extra round, and buys a plan the council actually agreed
+    // rather than one the cheapest seat happened to write.
+    planDrafts = await fanOut(
+      active.map(seat => () =>
+        reporting(
+          seat,
+          'plan',
+          askSeat(seat, planPrompt(options.query), options.apiKey, options.signal, options.timeoutMs, options.memory),
+          spend,
+          emit,
+        )),
+      sequential,
+    )
+    for (const draft of planDrafts) {
+      if (draft.error !== undefined || draft.text === '') {
+        planFailures.push({ seat: draft.seat, error: draft.error ?? 'empty plan' })
+      }
+    }
+    const usablePlans = planDrafts.filter(draft => draft.error === undefined && draft.text !== '')
+    if (usablePlans.length > 1) {
+      planReviews = await fanOut(
+        active.map(seat => async (): Promise<SeatReview> => {
+          const reply = await reporting(
+            seat,
+            'review',
+            askSeat(
+              seat,
+              reviewPrompt(options.query, planDrafts, active),
+              options.apiKey,
+              options.signal,
+              options.timeoutMs,
+              options.memory,
+            ),
+            spend,
+            emit,
+          )
+          if (reply.error !== undefined) {
+            return { seat: seat.id, confidence: 0, critique: '', error: reply.error, ms: reply.ms }
+          }
+          const parsed = parseReview(reply.text, active)
+          return {
+            seat: seat.id,
+            confidence: parsed.confidence,
+            critique: parsed.critique,
+            ms: reply.ms,
+            ...parsed.vote === undefined ? {} : { vote: parsed.vote },
+          }
+        }),
+        sequential,
+      )
+    }
+    planVerdict = tally(planReviews, planDrafts)
+    const winner = planVerdict.winner ?? usablePlans[0]?.seat
+    const chosen = planDrafts.find(draft => draft.seat === winner)
+    if (chosen !== undefined && chosen.text !== '') {
+      plan = chosen.text
+      planSeat = chosen.seat
+    }
+  }
   if (plan === undefined && options.skipPlan !== true) {
     for (const planner of plannerOrder(active, options.plannerSeat)) {
       const reply = await reporting(
@@ -558,6 +636,7 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
       plan,
       planSeat,
       ...planFailures.length === 0 ? {} : { planFailures },
+      ...planDrafts.length === 0 ? {} : { planDrafts, planReviews, planVerdict },
       budget,
       estimate: options.estimate,
       spentUsd: spendBetween(before, await readBalance(options.apiKey, options.signal)),

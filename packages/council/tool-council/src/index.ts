@@ -148,6 +148,11 @@ export interface Config {
    * Route approved work to a swarm of workers instead of answering in one
    * agent. Off by default: a swarm writes files and runs commands.
    */
+  /**
+   * How the plan is produced. Defaults to `council`: the plan is the decision
+   * every later round inherits, so it should not rest on one seat.
+   */
+  planMode?: 'single' | 'council'
   swarmMode?: boolean
   /**
    * Per-provider swarm roster, keyed by subagent provider name. A dict of
@@ -214,6 +219,7 @@ export const Config: z<Config> = z.object({
   approvedPlanId: z.string(),
   approvedAt: z.number(),
   autoApprove: z.boolean().default(false),
+  planMode: z.union([z.const('single'), z.const('council')]).default('council'),
   swarmMode: z.boolean().default(false),
   swarmRoster: z.dict(z.object({
     enabled: z.boolean(),
@@ -505,6 +511,11 @@ export function apply(ctx: Context, config: Config = {}): void {
         description: 'Stop after the planning round and return the plan without spending the drafting and review rounds.',
       },
       skipPlan: { type: 'boolean', description: 'Skip planning and go straight to drafting.' },
+      planMode: {
+        type: 'string',
+        enum: ['single', 'council'],
+        description: 'single: one seat writes the plan. council: every seat proposes one and the council votes. Defaults to the configured mode.',
+      },
       noColor: { type: 'boolean', description: 'Disable ANSI colour in the console report.' },
       sequential: { type: 'boolean', description: 'Run seats one at a time instead of in parallel.' },
     },
@@ -584,6 +595,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           ? { plan: settingsNow.pendingPlanText }
           : {}),
         skipPlan,
+        planMode: args.planMode ?? config.planMode ?? 'council',
         planOnly,
         budget: {
           minBalanceUsd: config.minBalanceUsd ?? 0.5,

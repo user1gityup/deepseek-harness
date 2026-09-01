@@ -84,6 +84,22 @@ export function renderMarkdown(result: CouncilResult): string {
     if (result.plan === undefined || result.plan === '') {
       out.push('**No seat could produce a plan.** The estimate below is sized on defaults rather than on an agreed approach. Approving will still run the full council.', '')
     }
+    // When the council voted on the plan, show the competing proposals and the
+    // vote: otherwise a plan chosen by four seats looks identical to one
+    // written by the cheapest.
+    const planDrafts = result.planDrafts ?? []
+    if (planDrafts.length > 0) {
+      out.push('### Proposed plans', '')
+      for (const draft of planDrafts) out.push(...draftSection(draft, result.seats))
+      const votes = [...(result.planVerdict?.scores.entries() ?? [])].sort((a, b) => b[1] - a[1])
+      if (votes.length > 0) {
+        out.push('**Vote on the plan**', '')
+        for (const [id, score] of votes) {
+          out.push(`- ${disc(id)} ${nameOf(result.seats, id)}: ${score.toFixed(2)}`)
+        }
+        out.push('')
+      }
+    }
     if (result.plan !== undefined && result.plan !== '') {
       const author = result.planSeat === undefined ? '' : ` ${disc(result.planSeat)} ${nameOf(result.seats, result.planSeat)}`
       out.push(`**Plan**${author}`, '', result.plan, '')

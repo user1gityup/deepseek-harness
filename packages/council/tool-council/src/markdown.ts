@@ -120,6 +120,9 @@ export function renderMarkdown(result: CouncilResult): string {
     }
     // Say which of the two factors is outstanding, so the gate never looks
     // like a malfunction.
+    if (result.issueProblem !== undefined) {
+      out.push(`> **!** No Approve control can appear: ${result.issueProblem}. Nothing further will run until this is fixed.`, '')
+    }
     const approval = result.approval
     if (approval !== undefined && !approval.allowed) {
       const step = approval.missing === 'verbal'

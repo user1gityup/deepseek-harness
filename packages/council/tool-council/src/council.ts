@@ -109,6 +109,8 @@ export interface CouncilResult {
   readonly planReviews?: readonly SeatReview[] | undefined
   /** How the winning plan won. */
   readonly planVerdict?: Verdict | undefined
+  /** Why the Approve control could not be offered, when it could not. */
+  readonly issueProblem?: string | undefined
   /** The agreed approach, when a planning round ran or one was supplied. */
   readonly plan?: string | undefined
   /** The seat that produced the plan, when the council generated it. */

@@ -1967,6 +1967,9 @@ importers:
 
   packages/client/ui-council-budget:
     dependencies:
+      '@deepseek-ai/dsh-client-ui-tool':
+        specifier: workspace:^
+        version: link:../ui-tool
       zod:
         specifier: ^4.4.3
         version: 4.4.3

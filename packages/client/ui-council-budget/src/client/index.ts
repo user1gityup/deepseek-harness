@@ -16,7 +16,7 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { NS, en, zh, type BudgetKey } from './locales.ts'
 import { CouncilBudget } from './CouncilBudget.tsx'
 import { CouncilToggle } from './CouncilToggle.tsx'
-import { PlanApproval } from './PlanApproval.tsx'
+import { CouncilCallView } from './CouncilCallView.tsx'
 import { SwarmRoster } from './SwarmRoster.tsx'
 import { SwarmToggle } from './SwarmToggle.tsx'
 
@@ -76,13 +76,13 @@ export function apply(ctx: ClientContext): void {
     CouncilToggle,
   )
 
-  // The spending gate. Its own line above the composer: an approval control
-  // that shares a row with other chrome is one people press without reading.
-  ctx.slots.register(
+  // The spending gate lives on the call that issued the plan, not floating
+  // above the composer: an approval control detached from the thing it
+  // approves is ambiguous once the message scrolls away.
+  ctx.slots.inject('tool.call.toolview', () => ctx.slots.register(
     {
-      name: 'conversation.input.dock',
-      id: 'council-plan-approval',
-      order: 5,
+      name: 'tool.call.toolview',
+      key: 'council',
       locale: NS,
       inject: () => ({
         settings: ctx.settingsScope.bind<Record<string, unknown>>({
@@ -92,8 +92,8 @@ export function apply(ctx: ClientContext): void {
         }),
       }),
     },
-    PlanApproval,
-  )
+    CouncilCallView,
+  ))
 
   // Swarm mode gets its own switch: it is a larger commitment than council
   // mode, and burying it inside that one would hide the difference.

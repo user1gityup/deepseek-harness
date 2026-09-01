@@ -12,6 +12,7 @@ import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { Context } from '@deepseek-ai/cordis'
 import { randomUUID } from 'node:crypto'
 import { judgeApproval, planExpired } from './approval.ts'
+import { describeError } from './errors.ts'
 import type {} from '@deepseek-ai/dsh-web'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -254,6 +255,12 @@ const COUNCIL_VALUE_SCHEMA = {
     tied: { type: 'boolean', required: true },
     report: { type: 'string', required: true },
     failures: { type: 'array', required: true, items: { type: 'string' } },
+    /**
+     * Plan this call issued, when it stopped at the gate. The Approve control
+     * renders on the call that proposed the plan, so it needs to know which
+     * plan that was rather than guessing from whatever is current.
+     */
+    planId: { type: 'string' },
   },
 } as const satisfies ValueSchemaSpec
 
@@ -585,6 +592,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           method: 'none',
           tied: false,
           failures: [],
+          ...(heldId === undefined ? {} : { planId: heldId }),
           ...(settingsNow.pendingPlanText === undefined || settingsNow.pendingPlanText === ''
             ? {}
             : { plan: settingsNow.pendingPlanText }),
@@ -653,16 +661,36 @@ export function apply(ctx: Context, config: Config = {}): void {
       let estimated = result
       // Issue the plan for approval, or retire the approval that was just
       // spent. Both write settings, the one channel the model cannot reach.
+      let issueProblem: string | undefined
+      let issuedPlanId: string | undefined
       if (result.phase === 'plan' && !autoApproved) {
-        await ctx.settings?.update(COUNCIL_NAMESPACE, {
-          pendingPlanId: randomUUID(),
-          pendingPlanQuery: args.query,
-          pendingPlanText: result.plan ?? '',
-          pendingPlanIssuedAt: Date.now(),
-          // A newly issued plan voids any earlier approval outright.
-          approvedPlanId: '',
-          approvedAt: 0,
-        } as never)
+        const issuedId = randomUUID()
+        issuedPlanId = issuedId
+        // The Approve control is driven entirely by this write. If it fails,
+        // or the settings service is absent, the button never appears and the
+        // run is stuck with no way forward — so the failure is surfaced in the
+        // report rather than swallowed by an optional chain.
+        if (ctx.settings === undefined) {
+          issueProblem = 'the settings service is unavailable, so no Approve control can be shown'
+        } else {
+          try {
+            await ctx.settings.update(COUNCIL_NAMESPACE, {
+              pendingPlanId: issuedId,
+              pendingPlanQuery: args.query,
+              pendingPlanText: result.plan ?? '',
+              pendingPlanIssuedAt: Date.now(),
+              // A newly issued plan voids any earlier approval outright.
+              approvedPlanId: '',
+              approvedAt: 0,
+            } as never)
+            const check = live().pendingPlanId
+            if (check !== issuedId) {
+              issueProblem = `the plan was written but did not take effect (settings hold ${check ?? 'nothing'})`
+            }
+          } catch (error) {
+            issueProblem = `the plan could not be recorded: ${describeError(error)}`
+          }
+        }
       } else {
         // The run happened; the approval must not be reusable for the next one.
         // Retire with empty sentinels, not `undefined`: a settings update
@@ -696,7 +724,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           weeklyClaudeTokens: config.weeklyClaudeTokens,
           weeklyClaudeUsed: week.tokens,
         })
-        estimated = { ...result, estimate, approval }
+        estimated = { ...result, estimate, approval, ...issueProblem === undefined ? {} : { issueProblem } }
       }
 
       const wantsPlain = args.noColor === true || config.noColor === true
@@ -727,6 +755,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         method: result.verdict.method,
         tied: result.verdict.tied,
         report: plain,
+        ...(issuedPlanId === undefined ? {} : { planId: issuedPlanId }),
         failures,
       }
     },

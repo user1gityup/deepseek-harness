@@ -144,6 +144,21 @@ export interface Config {
    * standing permission to spend.
    */
   autoApprove?: boolean
+  /**
+   * Route approved work to a swarm of workers instead of answering in one
+   * agent. Off by default: a swarm writes files and runs commands.
+   */
+  swarmMode?: boolean
+  /**
+   * Per-provider swarm roster, keyed by subagent provider name. A dict of
+   * objects rather than a bare object: a top-level object schema gets an empty
+   * default materialised into it and fails its own required fields at boot.
+   */
+  swarmRoster?: Record<string, {
+    enabled?: boolean
+    kinds?: string[]
+    maxConcurrent?: number
+  }>
   /** Refuse to start when remaining OpenRouter credit falls below this. */
   minBalanceUsd?: number
   /** Monthly OpenRouter spend target used for pace warnings. */
@@ -199,6 +214,12 @@ export const Config: z<Config> = z.object({
   approvedPlanId: z.string(),
   approvedAt: z.number(),
   autoApprove: z.boolean().default(false),
+  swarmMode: z.boolean().default(false),
+  swarmRoster: z.dict(z.object({
+    enabled: z.boolean(),
+    kinds: z.array(z.string()),
+    maxConcurrent: z.number(),
+  })).default({}),
   minBalanceUsd: z.number().default(0.5),
   monthlyBudgetUsd: z.number().default(20),
   weeklyClaudeTokens: z.number(),

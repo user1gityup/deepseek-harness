@@ -17,6 +17,8 @@ import { NS, en, zh, type BudgetKey } from './locales.ts'
 import { CouncilBudget } from './CouncilBudget.tsx'
 import { CouncilToggle } from './CouncilToggle.tsx'
 import { PlanApproval } from './PlanApproval.tsx'
+import { SwarmRoster } from './SwarmRoster.tsx'
+import { SwarmToggle } from './SwarmToggle.tsx'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -91,5 +93,41 @@ export function apply(ctx: ClientContext): void {
       }),
     },
     PlanApproval,
+  )
+
+  // Swarm mode gets its own switch: it is a larger commitment than council
+  // mode, and burying it inside that one would hide the difference.
+  ctx.slots.register(
+    {
+      name: 'conversation.input.right',
+      id: 'swarm-toggle',
+      order: 6,
+      locale: NS,
+      inject: () => ({
+        settings: ctx.settingsScope.bind<Record<string, unknown>>({
+          namespace: 'council',
+          decode: section =>
+            typeof section === 'object' && section !== null ? section as Record<string, unknown> : {},
+        }),
+      }),
+    },
+    SwarmToggle,
+  )
+
+  ctx.slots.register(
+    {
+      name: 'conversation.input.dock',
+      id: 'swarm-roster',
+      order: 6,
+      locale: NS,
+      inject: () => ({
+        settings: ctx.settingsScope.bind<Record<string, unknown>>({
+          namespace: 'council',
+          decode: section =>
+            typeof section === 'object' && section !== null ? section as Record<string, unknown> : {},
+        }),
+      }),
+    },
+    SwarmRoster,
   )
 }

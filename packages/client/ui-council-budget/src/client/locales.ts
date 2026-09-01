@@ -41,6 +41,16 @@ export type BudgetKey =
   | 'approve.action'
   | 'approve.discard'
   | 'approve.awaitingMessage'
+  | 'swarm.toggleTitle'
+  | 'swarm.toggleLabel'
+  | 'swarm.toggleOn'
+  | 'swarm.toggleHint'
+  | 'swarm.title'
+  | 'swarm.hint'
+  | 'swarm.subscription'
+  | 'swarm.metered'
+  | 'swarm.noneEnabled'
+  | 'swarm.meteredWarning'
   | 'approve.always'
   | 'approve.alwaysHint'
   | 'approve.autoOn'
@@ -89,6 +99,16 @@ export const en: Record<BudgetKey, string> = {
   'approve.action': 'Approve',
   'approve.discard': 'Discard',
   'approve.awaitingMessage': 'Approved. Send a message to run the council.',
+  'swarm.toggleTitle': 'Swarm',
+  'swarm.toggleLabel': 'Run approved work as a swarm',
+  'swarm.toggleOn': 'Approved work is split across workers that write files and run commands',
+  'swarm.toggleHint': 'Split approved work across parallel workers. They act, not just answer.',
+  'swarm.title': 'Swarm roster',
+  'swarm.hint': 'Who does what. Subscription workers are preferred, so the seats you already pay for carry the load.',
+  'swarm.subscription': 'subscription',
+  'swarm.metered': 'metered',
+  'swarm.noneEnabled': 'No worker is enabled, so nothing can run.',
+  'swarm.meteredWarning': 'A metered worker is enabled: units it takes are billed per token.',
   'approve.always': 'Always approve',
   'approve.alwaysHint': 'Stop asking before each council run. The council will spend without checking with you first. You can switch this off at any time.',
   'approve.autoOn': 'Council auto-approve is ON — runs start without asking you.',
@@ -137,6 +157,16 @@ export const zh: Record<BudgetKey, string> = {
   'approve.action': '批准',
   'approve.discard': '丢弃',
   'approve.awaitingMessage': '已批准。发送一条消息即可运行议会。',
+  'swarm.toggleTitle': '蜂群',
+  'swarm.toggleLabel': '以蜂群方式执行已批准的工作',
+  'swarm.toggleOn': '已批准的工作将分配给会写入文件并执行命令的工作者',
+  'swarm.toggleHint': '将已批准的工作拆分给并行工作者。它们会实际执行，而不只是作答。',
+  'swarm.title': '蜂群名单',
+  'swarm.hint': '谁负责什么。优先使用订阅工作者，让已付费的席位承担主要工作。',
+  'swarm.subscription': '订阅',
+  'swarm.metered': '按量计费',
+  'swarm.noneEnabled': '没有启用任何工作者，因此无法运行。',
+  'swarm.meteredWarning': '已启用按量计费的工作者：它承担的任务将按 token 计费。',
   'approve.always': '始终批准',
   'approve.alwaysHint': '不再在每次运行前询问。议会将直接花费，不再与您确认。可随时关闭。',
   'approve.autoOn': '议会自动批准已开启 — 运行将不再征求您的同意。',

@@ -118,3 +118,163 @@ export async function gatherEvidence(
   if (sources.length === 0) return undefined
   return { block: render(sources, summary), urls: sources.map(source => source.url) }
 }
+
+/** Search queries requested per seat. Bounds one seat from spending the round. */
+export const MAX_QUERIES_PER_SEAT = 3
+/** Total queries run per council, however many seats asked. */
+export const MAX_QUERIES_TOTAL = 8
+
+/**
+ * Prompt asking a seat what it wants looked up.
+ *
+ * Deliberately cheap: a seat answers with query lines, not prose, so this
+ * round costs a few hundred tokens and buys searches that are free. The
+ * alternative — giving every seat its own metered web plugin — costs roughly
+ * 25x per call for the same information.
+ * @param query - the user's question.
+ * @param plan - the agreed approach, when there is one.
+ * @returns the prompt.
+ */
+export function researchPrompt(query: string, plan: string | undefined): string {
+  const approach = plan === undefined || plan === '' ? '' : `
+
+AGREED APPROACH:
+${plan}`
+  return `Before answering, say what you would need to look up.
+
+Reply with nothing but query lines, at most ${String(MAX_QUERIES_PER_SEAT)}, each starting with SEARCH: and written as you would type it into a search engine.
+
+SEARCH: <query>
+
+Ask only for things a search could settle — current figures, versions, prices, dates, whether a library still exists. Do not ask for opinions or for anything you already know. If you need nothing looked up, reply with exactly: NONE${approach}
+
+QUESTION:
+${query}`
+}
+
+/**
+ * Pull search requests out of a seat's reply.
+ * @param text - the seat's reply.
+ * @param max - most queries to accept from this seat.
+ * @returns the requested queries, trimmed and deduplicated.
+ */
+export function parseSearchRequests(text: string, max = MAX_QUERIES_PER_SEAT): readonly string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*SEARCH\s*:\s*(.+)$/i.exec(line)
+    if (match === null) continue
+    const wanted = (match[1] ?? '').trim().replace(/^["'`]|["'`]$/g, '')
+    if (wanted === '' || wanted.length > 300) continue
+    const key = wanted.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(wanted)
+    if (out.length >= max) break
+  }
+  return out
+}
+
+/** One seat's requested queries. */
+export interface SeatQueries {
+  readonly seat: string
+  readonly queries: readonly string[]
+}
+
+/**
+ * Run every requested query through the seam and render one shared block.
+ *
+ * All searches go through the same seam the council already uses, whose router
+ * prefers a route already paid for by subscription — so a seat asking for
+ * three lookups costs nothing beyond the tokens it used to ask.
+ * @param seam - the web seam, or undefined when the host mounts none.
+ * @param requests - what each seat asked for.
+ * @param signal - cancellation from the run.
+ * @returns the evidence, or undefined when nothing could be retrieved.
+ */
+export async function gatherRequested(
+  seam: SearchSeam | undefined,
+  requests: readonly SeatQueries[],
+  signal?: AbortSignal,
+): Promise<Evidence | undefined> {
+  if (seam === undefined) return undefined
+
+  // Deduplicate across seats: two seats asking the same thing is one search.
+  const asked = new Map<string, string[]>()
+  for (const request of requests) {
+    for (const wanted of request.queries) {
+      const key = wanted.toLowerCase()
+      const owners = asked.get(key)
+      if (owners === undefined) asked.set(key, [request.seat])
+      else if (!owners.includes(request.seat)) owners.push(request.seat)
+    }
+  }
+  const queries = [...asked.keys()].slice(0, MAX_QUERIES_TOTAL)
+  if (queries.length === 0) return undefined
+
+  const blocks: string[] = []
+  const urls: string[] = []
+  for (const wanted of queries) {
+    let sources: readonly EvidenceSource[] = []
+    let summary: string | undefined
+    try {
+      const result = await seam.search({ query: wanted, maxResults: 4 }, signal)
+      sources = result.sources
+      summary = result.content
+    } catch {
+      // One failed query must not lose the answers to the others.
+      continue
+    }
+    if (sources.length === 0) continue
+    const owners = asked.get(wanted) ?? []
+    blocks.push(renderQuery(wanted, owners, sources, summary, urls.length))
+    for (const source of sources) urls.push(source.url)
+  }
+  if (blocks.length === 0) return undefined
+
+  const head = [
+    'EVIDENCE — retrieved from the web moments ago, in answer to what the council asked for.',
+    '',
+    'This is current and your training data is not. Where the two disagree, the evidence wins.',
+    '',
+  ].join(String.fromCharCode(10))
+  const tail = [
+    '',
+    'Cite these by their number. If the evidence does not settle something, say so plainly rather than filling the gap from memory.',
+  ].join(String.fromCharCode(10))
+  const joined = blocks.join(String.fromCharCode(10) + String.fromCharCode(10))
+  return { block: `${head}${joined}${tail}`, urls }
+}
+
+/**
+ * Render one query's results, naming who asked for it.
+ * @param wanted - the query.
+ * @param owners - seats that asked for it.
+ * @param sources - what came back.
+ * @param summary - optional provider summary.
+ * @param offset - running citation number.
+ * @returns the rendered section.
+ */
+function renderQuery(
+  wanted: string,
+  owners: readonly string[],
+  sources: readonly EvidenceSource[],
+  summary: string | undefined,
+  offset: number,
+): string {
+  const who = owners.length === 0 ? '' : ` (asked by ${owners.join(', ')})`
+  const lines: string[] = [`QUERY: ${wanted}${who}`]
+  if (summary !== undefined && summary.trim() !== '') {
+    lines.push(`  summary: ${tidy(summary)}`)
+  }
+  sources.forEach((source, index) => {
+    const label = source.title === undefined || source.title.trim() === ''
+      ? source.url
+      : `${source.title.trim()} — ${source.url}`
+    lines.push(`  [${String(offset + index + 1)}] ${label}`)
+    if (source.snippet !== undefined && source.snippet.trim() !== '') {
+      lines.push(`      ${tidy(source.snippet)}`)
+    }
+  })
+  return lines.join(String.fromCharCode(10))
+}

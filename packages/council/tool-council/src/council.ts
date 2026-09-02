@@ -13,7 +13,7 @@ import type { SeatId } from './colors.ts'
 import type { SeatConfig, SeatReply } from './seats.ts'
 import { auditDraft } from './verify.ts'
 import type { DraftAudit, FetchSeam } from './verify.ts'
-import { gatherEvidence } from './evidence.ts'
+import { gatherEvidence, gatherRequested, parseSearchRequests, researchPrompt } from './evidence.ts'
 import type { Evidence, SearchSeam } from './evidence.ts'
 import { askSeat } from './seats.ts'
 
@@ -187,6 +187,13 @@ export interface RunOptions {
    * leaves them offline, answering from training data alone.
    */
   readonly webMaxResults?: number | undefined
+  /**
+   * Let each seat say what it wants looked up, then run those searches through
+   * the web seam on its behalf. The seam's router prefers a subscription
+   * route, so the searches themselves are normally free — only the short round
+   * where seats state their queries costs anything.
+   */
+  readonly seatResearch?: boolean | undefined
 }
 
 /** Prompt for the planning round. */
@@ -665,6 +672,33 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
     }
   }
 
+  // Seats say what they want looked up, and the searches run on their behalf.
+  // This is the cheap half of the trade: asking costs a few hundred tokens per
+  // seat, and the searches themselves go through the seam's subscription route
+  // for nothing — where giving every seat its own metered web plugin costs
+  // roughly 25x per call for the same information.
+  let researched: Awaited<ReturnType<typeof gatherRequested>>
+  if (options.seatResearch === true && options.web !== undefined && active.length > 0) {
+    const asks = await fanOut(
+      active.map(seat => () =>
+        reporting(
+          seat,
+          'plan',
+          askSeat(seat, researchPrompt(options.query, plan), options.apiKey, options.signal, options.timeoutMs, options.memory),
+          spend,
+          emit,
+        )),
+      sequential,
+    )
+    const requests = asks
+      .filter(ask => ask.error === undefined && ask.text !== '')
+      .map(ask => ({ seat: ask.seat, queries: parseSearchRequests(ask.text) }))
+      .filter(request => request.queries.length > 0)
+    if (requests.length > 0) {
+      researched = await gatherRequested(options.web, requests, options.signal)
+    }
+  }
+
   // One search, shared by every seat. Retrieved after the planning gate so a
   // run the user abandons at the plan never pays for it, and before the drafts
   // so all seats reason over the same sources rather than their own memories.
@@ -672,9 +706,12 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
   const needsTools = active.some(seat => seat.transport === 'openrouter')
   // Shared evidence exists to compensate for blind seats. Seats with their
   // own live search do not need it, and paying for both is paying twice.
-  const evidence = needsTools && !online
+  // Seat-directed results beat one generic search: they answer what the seats
+  // said they needed. Fall back to the single search only when nothing was
+  // asked for, or when the research round is switched off.
+  const evidence = researched ?? (needsTools && !online
     ? await gatherEvidence(options.web, options.query, options.signal)
-    : undefined
+    : undefined)
   const drafts = await fanOut(
     active.map(seat => () =>
       reporting(

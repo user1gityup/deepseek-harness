@@ -162,6 +162,12 @@ export interface Config {
    * Web results each hosted seat may request per call. Zero leaves them
    * offline. OpenRouter bills per result, so this is a spending dial.
    */
+  /**
+   * Let seats request their own searches, run through the web seam on their
+   * behalf. On by default: the searches go through a subscription route, so
+   * this is the cheap way to give every seat live information.
+   */
+  seatResearch?: boolean
   webMaxResults?: number
   planMode?: 'single' | 'council'
   swarmMode?: boolean
@@ -230,6 +236,7 @@ export const Config: z<Config> = z.object({
   approvedPlanId: z.string(),
   approvedAt: z.number(),
   autoApprove: z.boolean().default(false),
+  seatResearch: z.boolean().default(true),
   webMaxResults: z.natural().default(0),
   planMode: z.union([z.const('single'), z.const('council')]).default('council'),
   swarmMode: z.boolean().default(false),
@@ -664,6 +671,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         skipPlan,
         planMode: args.planMode ?? config.planMode ?? 'council',
         webMaxResults: config.webMaxResults ?? 0,
+        seatResearch: config.seatResearch !== false,
         planOnly,
         budget: {
           minBalanceUsd: config.minBalanceUsd ?? 0.5,

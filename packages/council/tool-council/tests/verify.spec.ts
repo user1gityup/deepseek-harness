@@ -198,3 +198,19 @@ describe('the free-claude seat is genuinely separate', () => {
     expect(paid?.env).toBeUndefined()
   })
 })
+
+describe('a slow seat gets its own timeout', () => {
+  it('gives the free seat more room than the run default', () => {
+    // A free-tier provider retries through 529s before answering. One global
+    // timeout cannot serve a paid seat and a free one: set for the fast seat
+    // it kills the slow one mid-retry.
+    const free = DEFAULT_SEATS.find(seat => seat.id === 'free-claude')
+    expect(free?.timeoutMs).toBeGreaterThan(180_000)
+  })
+
+  it('leaves the paid seats on the run default', () => {
+    for (const id of ['claude', 'kimi', 'deepseek']) {
+      expect(DEFAULT_SEATS.find(seat => seat.id === id)?.timeoutMs).toBeUndefined()
+    }
+  })
+})

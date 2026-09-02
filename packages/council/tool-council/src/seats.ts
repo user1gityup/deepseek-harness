@@ -38,6 +38,15 @@ export interface SeatConfig {
    */
   readonly args?: readonly string[] | undefined
   /**
+   * Seat-specific hard cap, overriding the run's timeout.
+   *
+   * One global timeout cannot serve a paid seat and a free one equally: a
+   * free-tier provider retries through 529s and is legitimately slower, so a
+   * limit set for a fast seat kills a slow one mid-answer while a limit set
+   * for the slow one lets a hung fast seat stall the round.
+   */
+  readonly timeoutMs?: number | undefined
+  /**
    * For `cli`: environment layered over the parent process environment.
    *
    * This is what lets one CLI serve as two independent seats: a seat can point
@@ -134,6 +143,11 @@ export const DEFAULT_SEATS: readonly SeatConfig[] = [
       DISABLE_FEEDBACK_COMMAND: '1',
       DISABLE_ERROR_REPORTING: '1',
     },
+    // Free-tier providers retry through 529s before answering. Measured: a
+    // council-sized prompt spent 84s being refused capacity before giving up,
+    // and the run's 180s default killed it mid-retry. This buys it the room to
+    // fall through to another provider rather than fail the round.
+    timeoutMs: 420_000,
     enabled: false,
   },
   {
@@ -510,13 +524,15 @@ export function askSeat(
   memory?: { file?: string | undefined; text?: string | undefined } | undefined,
   webMaxResults?: number | undefined,
 ): Promise<SeatReply> {
+  // A seat's own cap wins over the run's, in both directions.
+  const cap = seat.timeoutMs ?? timeoutMs
   if (seat.transport === 'cli') {
-    return askCliSeat(seat, prompt, signal, timeoutMs, memory?.file)
+    return askCliSeat(seat, prompt, signal, cap, memory?.file)
   }
   // An OpenRouter seat has no filesystem, so shared memory has to ride in the
   // prompt. That is the cost of including a hosted model in the council.
   const withMemory = memory?.text === undefined || memory.text === ''
     ? prompt
     : `${memory.text}\n\n---\n\n${prompt}`
-  return askOpenRouterSeat(seat, withMemory, apiKey, signal, timeoutMs, undefined, webMaxResults)
+  return askOpenRouterSeat(seat, withMemory, apiKey, signal, cap, undefined, webMaxResults)
 }

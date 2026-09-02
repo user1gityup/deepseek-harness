@@ -77,6 +77,8 @@ export interface SeatUsage {
 
 /** A seat's answer, or the reason it produced none. */
 export interface SeatReply {
+  /** URLs the provider reports this seat actually consulted, when it searched. */
+  readonly citedUrls?: readonly string[] | undefined
   readonly seat: SeatId
   /** Model text, empty when `error` is set. */
   readonly text: string
@@ -179,6 +181,15 @@ export const DEFAULT_SEATS: readonly SeatConfig[] = [
  * Set generously — no realistic council draft approaches this.
  */
 export const DEFAULT_MAX_OUTPUT_TOKENS = 16_000
+
+/**
+ * Web results requested per seat when live search is on.
+ *
+ * OpenRouter bills the web plugin per result, so this is a cost dial, not a
+ * quality dial past the first few: five gives a seat enough to check a claim
+ * without turning every draft into a research bill.
+ */
+export const DEFAULT_WEB_MAX_RESULTS = 5
 
 const WINDOWS_EXTENSIONS = ['.exe', '.com', '.cmd', '.bat', ''] as const
 
@@ -392,6 +403,7 @@ export async function askOpenRouterSeat(
   signal: AbortSignal | undefined,
   timeoutMs: number,
   maxTokens: number = DEFAULT_MAX_OUTPUT_TOKENS,
+  webMaxResults?: number | undefined,
 ): Promise<SeatReply> {
   const started = Date.now()
   if (apiKey === undefined || apiKey === '') {
@@ -410,7 +422,18 @@ export async function askOpenRouterSeat(
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ model, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        messages: [{ role: 'user', content: prompt }],
+        // Live search, when the caller asks for it. This is what lets a
+        // hosted seat check a current fact instead of answering from training
+        // data — the gap that shared evidence and citation auditing exist to
+        // work around. OpenRouter bills per result, so it is opt-in.
+        ...webMaxResults === undefined || webMaxResults <= 0
+          ? {}
+          : { plugins: [{ id: 'web', max_results: webMaxResults }] },
+      }),
       signal: composite,
     })
     if (!response.ok) {
@@ -424,7 +447,7 @@ export async function askOpenRouterSeat(
     }
     const body = await response.json() as {
       model?: unknown
-      choices?: readonly { message?: { content?: unknown; reasoning?: unknown } }[]
+      choices?: readonly { message?: { content?: unknown; reasoning?: unknown; annotations?: unknown } }[]
       usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; cost?: unknown }
     }
     const num = (value: unknown): number | undefined =>
@@ -446,7 +469,24 @@ export async function askOpenRouterSeat(
     if (text === '') {
       return { seat: seat.id, text: '', error: 'empty response', ms: Date.now() - started, usage }
     }
-    return { seat: seat.id, text, ms: Date.now() - started, usage }
+    // Surface what the seat actually consulted. A seat that searched and a
+    // seat that recalled look identical in the text; the citations are the
+    // only way the audit can tell them apart.
+    const cited: string[] = []
+    const annotations = (first as { annotations?: unknown } | undefined)?.annotations
+    if (Array.isArray(annotations)) {
+      for (const entry of annotations) {
+        const citation = (entry as { url_citation?: { url?: unknown } }).url_citation
+        if (typeof citation?.url === 'string') cited.push(citation.url)
+      }
+    }
+    return {
+      seat: seat.id,
+      text,
+      ms: Date.now() - started,
+      usage,
+      ...cited.length === 0 ? {} : { citedUrls: cited },
+    }
   } catch (error) {
     return { seat: seat.id, text: '', error: describeError(error), ms: Date.now() - started }
   }
@@ -468,6 +508,7 @@ export function askSeat(
   signal: AbortSignal | undefined,
   timeoutMs: number,
   memory?: { file?: string | undefined; text?: string | undefined } | undefined,
+  webMaxResults?: number | undefined,
 ): Promise<SeatReply> {
   if (seat.transport === 'cli') {
     return askCliSeat(seat, prompt, signal, timeoutMs, memory?.file)
@@ -477,5 +518,5 @@ export function askSeat(
   const withMemory = memory?.text === undefined || memory.text === ''
     ? prompt
     : `${memory.text}\n\n---\n\n${prompt}`
-  return askOpenRouterSeat(seat, withMemory, apiKey, signal, timeoutMs)
+  return askOpenRouterSeat(seat, withMemory, apiKey, signal, timeoutMs, undefined, webMaxResults)
 }

@@ -182,6 +182,11 @@ export interface RunOptions {
    * retrieved — which is still far better than leaving them to guess.
    */
   readonly web?: (SearchSeam & Partial<FetchSeam>) | undefined
+  /**
+   * Web results each hosted seat may request per call. Undefined or zero
+   * leaves them offline, answering from training data alone.
+   */
+  readonly webMaxResults?: number | undefined
 }
 
 /** Prompt for the planning round. */
@@ -212,8 +217,16 @@ ${query}`
  * present training data as verified. Saying plainly that the tools are absent
  * costs a few tokens and removes the incentive entirely.
  */
-function toolNotice(toolless: boolean, hasEvidence: boolean): string {
+function toolNotice(toolless: boolean, hasEvidence: boolean, online: boolean): string {
   if (!toolless) return ''
+  // A seat that can search must not be told it cannot. The notice exists to
+  // stop a tool-less seat faking tool calls; aimed at a seat with live search
+  // it would suppress the very capability the user is paying per result for.
+  if (online) {
+    return `
+
+YOUR TOOLS: you have live web search in this call. Use it to check anything current, and cite what you actually consulted. Do not present recalled figures as verified — if you did not look it up, mark it [unverified].`
+  }
   const source = hasEvidence
     ? 'Work from the EVIDENCE above and your own knowledge.'
     : 'No evidence could be retrieved for this question, so work from your own knowledge alone.'
@@ -228,6 +241,7 @@ function draftPrompt(
   plan: string | undefined,
   evidence: Evidence | undefined,
   toolless: boolean,
+  online: boolean,
 ): string {
   const guidance = plan === undefined || plan === ''
     ? ''
@@ -240,7 +254,7 @@ ${plan}`
 ${evidence.block}`
   return `You are one member of a council answering a user's question.
 
-Give your best complete answer. Be specific and concrete. Do not mention that you are part of a council, and do not address the other members.${facts}${toolNotice(toolless, evidence !== undefined)}${guidance}
+Give your best complete answer. Be specific and concrete. Do not mention that you are part of a council, and do not address the other members.${facts}${toolNotice(toolless, evidence !== undefined, online)}${guidance}
 
 USER QUESTION:
 ${query}`
@@ -654,8 +668,11 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
   // One search, shared by every seat. Retrieved after the planning gate so a
   // run the user abandons at the plan never pays for it, and before the drafts
   // so all seats reason over the same sources rather than their own memories.
+  const online = (options.webMaxResults ?? 0) > 0
   const needsTools = active.some(seat => seat.transport === 'openrouter')
-  const evidence = needsTools
+  // Shared evidence exists to compensate for blind seats. Seats with their
+  // own live search do not need it, and paying for both is paying twice.
+  const evidence = needsTools && !online
     ? await gatherEvidence(options.web, options.query, options.signal)
     : undefined
   const drafts = await fanOut(
@@ -663,7 +680,7 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
       reporting(
         seat,
         'draft',
-        askSeat(seat, draftPrompt(options.query, plan, evidence, seat.transport === 'openrouter'), options.apiKey, options.signal, options.timeoutMs, options.memory),
+        askSeat(seat, draftPrompt(options.query, plan, evidence, seat.transport === 'openrouter', online), options.apiKey, options.signal, options.timeoutMs, options.memory, options.webMaxResults),
         spend,
         emit,
       )),
@@ -698,7 +715,15 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
         const reply = await reporting(
           seat,
           'review',
-          askSeat(seat, reviewPrompt(options.query, drafts, active), options.apiKey, options.signal, options.timeoutMs, options.memory),
+          askSeat(
+            seat,
+            reviewPrompt(options.query, drafts, active),
+            options.apiKey,
+            options.signal,
+            options.timeoutMs,
+            options.memory,
+            options.webMaxResults,
+          ),
           spend,
           emit,
         )
@@ -726,7 +751,11 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
       .map(async draft => auditDraft(
         draft.seat,
         draft.text,
-        evidence?.urls ?? [],
+        // A URL the provider reports the seat actually consulted is already
+        // retrieved, so it counts as evidence rather than something to go and
+        // check again. Without this a seat that genuinely searched would be
+        // billed a second fetch to prove it.
+        [...evidence?.urls ?? [], ...draft.citedUrls ?? []],
         fetchSeam,
         options.signal,
       )),

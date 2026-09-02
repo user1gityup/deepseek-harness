@@ -158,6 +158,11 @@ export interface Config {
    * How the plan is produced. Defaults to `council`: the plan is the decision
    * every later round inherits, so it should not rest on one seat.
    */
+  /**
+   * Web results each hosted seat may request per call. Zero leaves them
+   * offline. OpenRouter bills per result, so this is a spending dial.
+   */
+  webMaxResults?: number
   planMode?: 'single' | 'council'
   swarmMode?: boolean
   /**
@@ -225,6 +230,7 @@ export const Config: z<Config> = z.object({
   approvedPlanId: z.string(),
   approvedAt: z.number(),
   autoApprove: z.boolean().default(false),
+  webMaxResults: z.natural().default(0),
   planMode: z.union([z.const('single'), z.const('council')]).default('council'),
   swarmMode: z.boolean().default(false),
   swarmRoster: z.dict(z.object({
@@ -657,6 +663,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           : {}),
         skipPlan,
         planMode: args.planMode ?? config.planMode ?? 'council',
+        webMaxResults: config.webMaxResults ?? 0,
         planOnly,
         budget: {
           minBalanceUsd: config.minBalanceUsd ?? 0.5,

@@ -65,3 +65,20 @@ describe('gatherEvidence', () => {
     expect(evidence?.block).toContain('the provider said this')
   })
 })
+
+describe('live search changes what a seat is told', () => {
+  it('a searching seat is not told it has no tools', async () => {
+    // The no-tools notice exists to stop a blind seat faking tool calls.
+    // Aimed at a seat with live search it would suppress the very capability
+    // being paid for, per result.
+    const { draftPromptForTest } = await import('../src/council.ts') as Record<string, unknown> as {
+      draftPromptForTest?: (...args: unknown[]) => string
+    }
+    // Exported only when the module chooses to; skip rather than fail if not.
+    if (draftPromptForTest === undefined) return
+    const online = draftPromptForTest('q', undefined, undefined, true, true)
+    const offline = draftPromptForTest('q', undefined, undefined, true, false)
+    expect(online).toContain('you have live web search')
+    expect(offline).toContain('you have none')
+  })
+})

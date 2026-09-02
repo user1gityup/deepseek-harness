@@ -37,6 +37,15 @@ export interface SeatConfig {
    * distinct argv entry is what makes shell-free spawning safe.
    */
   readonly args?: readonly string[] | undefined
+  /**
+   * For `cli`: environment layered over the parent process environment.
+   *
+   * This is what lets one CLI serve as two independent seats: a seat can point
+   * at a different backend and keep its own config directory, so it shares
+   * neither credentials nor session state with a seat running on the user's
+   * own subscription.
+   */
+  readonly env?: Readonly<Record<string, string>> | undefined
   /** For `openrouter`: the model identifier to request. */
   readonly model?: string | undefined
   /**
@@ -94,6 +103,36 @@ export const DEFAULT_SEATS: readonly SeatConfig[] = [
     args: ['--allowedTools', 'WebSearch,WebFetch,Read,Glob,Grep', '-p', '{prompt}'],
     contextFileFlag: '--append-system-prompt-file',
     enabled: true,
+  },
+  {
+    id: 'free-claude',
+    name: 'Free Claude',
+    transport: 'cli',
+    command: 'claude',
+    // The same binary as the `claude` seat, deliberately run as a DIFFERENT
+    // instance of itself. Two things make it separate rather than a duplicate:
+    //
+    //  - ANTHROPIC_BASE_URL points at a local Free Claude Code proxy, so the
+    //    request never reaches Anthropic and never draws on the subscription.
+    //  - CLAUDE_CONFIG_DIR gives it its own config, credentials, and session
+    //    state. Without this the two seats would share ~/.claude, and the free
+    //    seat could silently fall back to the logged-in subscription — the
+    //    exact outcome it exists to avoid.
+    //
+    // Off by default: it needs the proxy running, and a seat that fails on
+    // every run of a fresh install is worse than one the user turns on.
+    args: ['--allowedTools', 'WebSearch,WebFetch,Read,Glob,Grep', '-p', '{prompt}'],
+    contextFileFlag: '--append-system-prompt-file',
+    env: {
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:8082',
+      ANTHROPIC_AUTH_TOKEN: 'freecc',
+      CLAUDE_CONFIG_DIR: join(homedir(), '.dsh', 'free-claude-home'),
+      CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1',
+      DISABLE_AUTOUPDATER: '1',
+      DISABLE_FEEDBACK_COMMAND: '1',
+      DISABLE_ERROR_REPORTING: '1',
+    },
+    enabled: false,
   },
   {
     id: 'openai',
@@ -232,6 +271,7 @@ function runOnce(
   args: readonly string[],
   signal: AbortSignal | undefined,
   timeoutMs: number,
+  env: Readonly<Record<string, string>> | undefined,
 ): Promise<RunResult> {
   return new Promise<RunResult>((resolve) => {
     // `shell: false` is the security boundary: the prompt is argv data, never
@@ -241,7 +281,13 @@ function runOnce(
     // CVE-2024-27980 fix), so this cannot rely on the 'error' event alone.
     let child
     try {
-      child = spawn(command, [...args], { shell: false, windowsHide: true })
+      child = spawn(command, [...args], {
+        shell: false,
+        windowsHide: true,
+        // Layered over the parent environment rather than replacing it: the
+        // child still needs PATH and the rest of it to start at all.
+        ...env === undefined ? {} : { env: { ...process.env, ...env } },
+      })
     } catch (error) {
       resolve({ stdout: '', stderr: '', code: null, spawnError: describeError(error) })
       return
@@ -306,7 +352,7 @@ export async function askCliSeat(
     : base
   let lastError = 'not found'
   for (const candidate of executableCandidates(command)) {
-    const result = await runOnce(candidate, args, signal, timeoutMs)
+    const result = await runOnce(candidate, args, signal, timeoutMs, seat.env)
     // ENOENT means this spelling does not exist; try the next candidate.
     // EINVAL is Node refusing to spawn a batch shim without a shell; treat it
     // as "wrong spelling" so the next candidate gets a turn.

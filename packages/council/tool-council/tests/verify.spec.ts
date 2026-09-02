@@ -4,6 +4,7 @@ import type { FetchSeam } from '../src/verify.ts'
 import { plannerOrder, tally } from '../src/council.ts'
 import type { SeatReview } from '../src/council.ts'
 import type { SeatReply } from '../src/seats.ts'
+import { DEFAULT_SEATS } from '../src/seats.ts'
 
 /** A seam answering with fixed status codes per URL. */
 function seam(codes: Record<string, number>): FetchSeam {
@@ -158,5 +159,42 @@ describe('blocked is not dead', () => {
     const audit = await auditDraft('kimi', 'https://example.invalid/gone', [], blocking(code))
     expect(audit.citations[0]?.status).toBe('unreachable')
     expect(audit.penalty).toBeGreaterThan(0)
+  })
+})
+
+describe('the free-claude seat is genuinely separate', () => {
+  const free = DEFAULT_SEATS.find(seat => seat.id === 'free-claude')
+
+  it('ships in the roster but starts disabled', () => {
+    // It needs a local proxy running; a seat that fails on every run of a
+    // fresh install is worse than one the user switches on deliberately.
+    expect(free).toBeDefined()
+    expect(free?.enabled).toBe(false)
+  })
+
+  it('routes to the local proxy, never to Anthropic', () => {
+    expect(free?.env?.['ANTHROPIC_BASE_URL']).toContain('127.0.0.1')
+  })
+
+  it('keeps its own config directory, so it cannot use the subscription login', () => {
+    // Without this the two Claude seats share ~/.claude, and the free seat
+    // could silently fall back to the logged-in subscription — the exact
+    // outcome it exists to avoid.
+    const dir = free?.env?.['CLAUDE_CONFIG_DIR']
+    expect(dir).toBeDefined()
+    expect(dir).not.toBe('')
+    const paid = DEFAULT_SEATS.find(seat => seat.id === 'claude')
+    expect(paid?.env?.['CLAUDE_CONFIG_DIR']).toBeUndefined()
+  })
+
+  it('runs the same binary as the paid seat, with the same tools', () => {
+    const paid = DEFAULT_SEATS.find(seat => seat.id === 'claude')
+    expect(free?.command).toBe(paid?.command)
+    expect(free?.args).toEqual(paid?.args)
+  })
+
+  it('leaves the paid seat with no environment overrides at all', () => {
+    const paid = DEFAULT_SEATS.find(seat => seat.id === 'claude')
+    expect(paid?.env).toBeUndefined()
   })
 })

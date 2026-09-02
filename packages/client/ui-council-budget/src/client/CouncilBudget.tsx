@@ -28,9 +28,21 @@ export type SettingsFace = SettingsScope<Record<string, unknown>>
 /** localStorage slot for the OpenRouter key, shared with the monitor panel. */
 const KEY_STORAGE = 'dsh:openrouter-monitor:api-key'
 
-/** Seats shipped by the council, mirrored here for display before any run. */
+/**
+ * Seats shipped by the council, mirrored here for display before any run.
+ *
+ * DUPLICATED from the host's DEFAULT_SEATS in `tool-council/src/seats.ts`,
+ * which is the source of truth. The client and host faces do not share a
+ * module, so this list is kept in step by hand — and a seat added there but
+ * not here is simply invisible in this panel, with no error to say so. That
+ * has already happened once. Change both, or neither.
+ */
 const DEFAULT_SEATS: readonly PanelSeat[] = [
   { id: 'claude', name: 'Claude', transport: 'cli', enabled: true },
+  // Free Claude ships disabled: it needs the local proxy running, and a seat
+  // that fails on every run of a fresh install is worse than one switched on
+  // deliberately.
+  { id: 'free-claude', name: 'Free Claude', transport: 'cli', enabled: false },
   { id: 'openai', name: 'OpenAI', transport: 'cli', enabled: true },
   { id: 'kimi', name: 'Kimi', transport: 'openrouter', model: 'moonshotai/kimi-k2', enabled: true },
   { id: 'deepseek', name: 'DeepSeek v4', transport: 'openrouter', model: 'deepseek/deepseek-v4-pro', enabled: true },

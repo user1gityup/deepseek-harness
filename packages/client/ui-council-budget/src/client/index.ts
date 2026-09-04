@@ -17,6 +17,7 @@ import { NS, en, zh, type BudgetKey } from './locales.ts'
 import { CouncilBudget } from './CouncilBudget.tsx'
 import { CouncilToggle } from './CouncilToggle.tsx'
 import { CouncilCallView } from './CouncilCallView.tsx'
+import { PipelineControl } from './PipelineControl.tsx'
 import { SwarmRoster } from './SwarmRoster.tsx'
 import { SwarmToggle } from './SwarmToggle.tsx'
 
@@ -148,5 +149,27 @@ export function apply(ctx: ClientContext): void {
       }),
     },
     SwarmRoster,
+  )
+
+  // The pipeline control sits with the roster because it commits the same
+  // seats to a longer run. It carries its own send face: the chain is a tool,
+  // and a tool can only be reached by asking for it, so the button says the
+  // asking — visibly, above the composer, rather than as a hidden prompt.
+  ctx.slots.register(
+    {
+      name: 'conversation.input.dock',
+      id: 'pipeline-control',
+      order: 7,
+      locale: NS,
+      inject: () => ({
+        settings: ctx.settingsScope.bind<Record<string, unknown>>({
+          namespace: 'council',
+          decode: section =>
+            typeof section === 'object' && section !== null ? section as Record<string, unknown> : {},
+        }),
+        send: async (text: string) => { await ctx.conversation.send(text) },
+      }),
+    },
+    PipelineControl,
   )
 }

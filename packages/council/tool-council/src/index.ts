@@ -27,6 +27,8 @@ import { projectCapacity, renderCapacity } from './capacity.ts'
 import { estimateRun, fetchModelPricing, parsePlanScale } from './estimate.ts'
 import { quotaReading, readClaudeUsage, startOfDay, startOfWeek } from './usage.ts'
 import { resolveOpenRouterKey, DEFAULT_KEY_ENV } from './credentials.ts'
+import { PIPELINE_STAGES, runPipeline, startPipeline } from './pipeline.ts'
+import type { PipelineStage, PipelineState } from './pipeline.ts'
 import { runCouncil } from './council.ts'
 import { runSwarm } from './swarm.ts'
 import { diskSeam, parseRoots } from './files.ts'
@@ -181,6 +183,32 @@ export interface Config {
    * seat, so it is the most expensive of the three and must be approved on its
    * own terms rather than inheriting either of the others.
    */
+  /**
+   * The council -> swarm -> council chain, as it survives between calls.
+   *
+   * The stage is durable state rather than something the model remembers, so
+   * a chain that gets interrupted resumes where it stood. These slots hold no
+   * approval of their own: each stage still passes its own tool's gate.
+   */
+  pipelineId?: string
+  /** The request the whole chain serves, in the user's own words. */
+  pipelineQuery?: string
+  /** Which stage the next call runs. */
+  pipelineStage?: string
+  /** The approach the council agreed, carried into the decomposition. */
+  pipelinePlan?: string
+  /** The approved graph, as JSON, so a resumed run needs no new planning call. */
+  pipelineTasks?: string
+  /** What the workers reported, as JSON, carried into the review. */
+  pipelineUnits?: string
+  /** Wording of the exhaustion that parked the run, empty when it is running. */
+  pipelineHoldDetail?: string
+  /** Seat whose allowance ran out. */
+  pipelineHoldSeat?: string
+  /** Epoch ms the hold ends at; 0 when there is no hold. */
+  pipelineHoldResumeAt?: number
+  /** Whether that time was stated by the provider or defaulted here. */
+  pipelineHoldSource?: string
   pendingProposeId?: string
   /** The change the seats would each write, shown on the Approve control. */
   pendingProposeTask?: string
@@ -304,6 +332,16 @@ export const Config: z<Config> = z.object({
   pendingSwarmIssuedAt: z.number(),
   approvedSwarmId: z.string(),
   approvedSwarmAt: z.number(),
+  pipelineId: z.string(),
+  pipelineQuery: z.string(),
+  pipelineStage: z.string(),
+  pipelinePlan: z.string(),
+  pipelineTasks: z.string(),
+  pipelineUnits: z.string(),
+  pipelineHoldDetail: z.string(),
+  pipelineHoldSeat: z.string(),
+  pipelineHoldResumeAt: z.number(),
+  pipelineHoldSource: z.string(),
   pendingProposeId: z.string(),
   pendingProposeTask: z.string(),
   pendingProposeRunId: z.string(),
@@ -368,6 +406,20 @@ const SWARM_VALUE_SCHEMA = {
     failures: { type: 'array', required: true, items: { type: 'string' } },
     /** Graph this call issued, when it stopped at the gate. */
     planId: { type: 'string' },
+  },
+} as const satisfies ValueSchemaSpec
+
+/** What one pipeline call reports back. */
+const PIPELINE_VALUE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    query: { type: 'string', required: true },
+    stage: { type: 'string', required: true },
+    phase: { type: 'string', required: true },
+    report: { type: 'string', required: true },
+    /** Epoch ms the run resumes at, when it is held on a spent allowance. */
+    resumeAt: { type: 'integer' },
   },
 } as const satisfies ValueSchemaSpec
 
@@ -1068,6 +1120,255 @@ export function apply(ctx: Context, config: Config = {}): void {
           .filter(unit => unit.error !== undefined)
           .map(unit => `${unit.seat} ${unit.task.id}: ${String(unit.error)}`),
         ...(issuedPlanId === undefined ? {} : { planId: issuedPlanId }),
+      }
+    },
+  }))
+
+  /**
+   * The subscription's session usage, as the status line last cached it.
+   *
+   * Read from the shared cache file rather than by calling `/usage`: a live
+   * call costs a request against the very quota it reports, which is the last
+   * thing a run parked ON that quota should spend. Absent or unreadable is a
+   * normal answer — the hold then simply waits out its own clock.
+   * @returns percent of the session window used, when it is known.
+   */
+  const statuslineSessionPercent = (): number | undefined => {
+    try {
+      const path = join(homedir(), '.claude', 'statusline', 'usage-cache.json')
+      if (!existsSync(path)) return undefined
+      const raw: unknown = JSON.parse(readFileSync(path, 'utf8'))
+      if (typeof raw !== 'object' || raw === null) return undefined
+      const value = (raw as Record<string, unknown>)['sessionPercent']
+      return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  // -- pipeline: council, then swarm, then council again, as one run --
+  //
+  // The three tools already chain by hand; what they cannot do by hand is
+  // REMEMBER. Nothing carries the agreed approach into the decomposition or
+  // the units' output into the review, and a model that forgets stage two
+  // simply skips it. Here the stage is durable state, so the chain is a
+  // property of the run rather than of the model's attention.
+  //
+  // One call advances one stage, and each stage still passes its OWN tool's
+  // gate: this tool adds no approval of its own and can bypass none. A spent
+  // subscription parks the run instead of failing it - see quota-hold.ts.
+  ctx.tools.register(defineTool({
+    name: 'pipeline',
+    description:
+      'Run a request through the whole chain: the council agrees the approach, the swarm splits and runs it, '
+      + 'then the council reviews what came back. Advances ONE stage per call and stops at each stage\'s own gate. '
+      + 'Call it again to continue; it resumes where it stood, including after a quota hold.',
+    parameters: {
+      query: { type: 'string', description: 'The work, in the user\'s own words. Omit to continue the run already in progress.' },
+      restart: { type: 'boolean', description: 'Abandon the run in progress and start a new one at the council stage.' },
+    },
+    output: {
+      schema: PIPELINE_VALUE_SCHEMA,
+      render: (_args: unknown, value: InferValue<typeof PIPELINE_VALUE_SCHEMA>) =>
+        [{ type: 'text' as const, text: value.report }],
+    },
+    async execute(args, exec) {
+      const apiKey = resolveOpenRouterKey({ variable: config.apiKeyEnv })
+      const settingsNow = live()
+      const running = settingsNow.pipelineId !== undefined && settingsNow.pipelineId !== ''
+      const storedTasks = readStoredTasks(settingsNow.pipelineTasks)
+      const storedStage = settingsNow.pipelineStage ?? ''
+      const heldAt = settingsNow.pipelineHoldResumeAt ?? 0
+
+      const state: PipelineState = running && args.restart !== true
+        ? {
+          id: settingsNow.pipelineId ?? '',
+          query: settingsNow.pipelineQuery ?? args.query ?? '',
+          stage: (PIPELINE_STAGES as readonly string[]).includes(storedStage)
+            ? (storedStage as PipelineStage)
+            : 'council',
+          ...(settingsNow.pipelinePlan === undefined || settingsNow.pipelinePlan === ''
+            ? {}
+            : { plan: settingsNow.pipelinePlan }),
+          ...(storedTasks === undefined ? {} : { tasks: storedTasks }),
+          ...(heldAt === 0
+            ? {}
+            : {
+              hold: {
+                detail: settingsNow.pipelineHoldDetail ?? '',
+                resumeAt: heldAt,
+                source: settingsNow.pipelineHoldSource === 'stated' ? ('stated' as const) : ('default' as const),
+                ...(settingsNow.pipelineHoldSeat === undefined || settingsNow.pipelineHoldSeat === ''
+                  ? {}
+                  : { seat: settingsNow.pipelineHoldSeat }),
+              },
+            }),
+        }
+        : startPipeline(randomUUID(), args.query ?? settingsNow.pipelineQuery ?? '')
+
+      if (state.query === '') {
+        return {
+          query: '',
+          stage: state.stage,
+          phase: 'blocked',
+          report: '## Pipeline\n\nNo request to run. Call it with `query` set to the work you want carried through the chain.',
+        }
+      }
+
+      const pricing = await fetchModelPricing(exec.signal)
+      const seatsNow = currentSeats()
+
+      // Each stage is judged by the gate of the tool that actually spends, so
+      // this tool can neither add an approval nor stand in for one.
+      const councilApproved = (): boolean => settingsNow.autoApprove === true || judgeApproval({
+        pendingPlan: settingsNow.pendingPlanId === undefined || settingsNow.pendingPlanId === '' ? undefined : {
+          id: settingsNow.pendingPlanId,
+          query: settingsNow.pendingPlanQuery ?? '',
+          issuedAt: settingsNow.pendingPlanIssuedAt ?? 0,
+        },
+        approvedPlanId: settingsNow.approvedPlanId,
+        approvedAt: settingsNow.approvedAt,
+        lastUserTurnAt,
+      }).allowed
+
+      const swarmApproved = (): boolean => settingsNow.autoApprove === true || judgeApproval({
+        pendingPlan: settingsNow.pendingSwarmId === undefined || settingsNow.pendingSwarmId === '' ? undefined : {
+          id: settingsNow.pendingSwarmId,
+          query: settingsNow.pendingSwarmQuery ?? '',
+          issuedAt: settingsNow.pendingSwarmIssuedAt ?? 0,
+        },
+        approvedPlanId: settingsNow.approvedSwarmId,
+        approvedAt: settingsNow.approvedSwarmAt,
+        lastUserTurnAt,
+      }).allowed
+
+      const result = await runPipeline({
+        state,
+        sessionPercent: statuslineSessionPercent(),
+        async runStage(stage, input) {
+          if (stage === 'swarm') {
+            const approved = swarmApproved()
+            const swarm = await runSwarm({
+              query: input.plan === undefined || input.plan === ''
+                ? input.query
+                : `${input.query}${String.fromCharCode(10)}${String.fromCharCode(10)}AGREED APPROACH (from the council):${String.fromCharCode(10)}${input.plan}`,
+              seats: seatsNow,
+              overrides: config.swarmRoster ?? {},
+              approved,
+              apiKey,
+              pricing,
+              timeoutMs,
+              signal: exec.signal,
+              sequential: config.sequential,
+              memory: resolveMemory(live().memoryDigest),
+              webMaxResults: config.webMaxResults ?? 0,
+              files: diskSeam(),
+              fileRoots: parseRoots(config.fileRoots),
+              ...(config.plannerSeat === undefined ? {} : { planner: config.plannerSeat }),
+              ...(input.tasks === undefined || !approved ? {} : { tasks: input.tasks }),
+            })
+            if (swarm.phase === 'plan' && settingsNow.autoApprove !== true) {
+              await ctx.settings?.update(COUNCIL_NAMESPACE, {
+                pendingSwarmId: randomUUID(),
+                pendingSwarmQuery: swarm.query,
+                pendingSwarmTasks: JSON.stringify(swarm.tasks),
+                pendingSwarmIssuedAt: Date.now(),
+                approvedSwarmId: '',
+                approvedSwarmAt: 0,
+              } as never)
+            }
+            return {
+              report: swarm.report,
+              complete: swarm.phase === 'full',
+              tasks: swarm.tasks,
+              units: swarm.results,
+              failures: swarm.results
+                .filter(unit => unit.error !== undefined)
+                .map(unit => ({ seat: unit.seat, error: String(unit.error) })),
+              ...(swarm.phase === 'blocked' ? { problems: swarm.problems } : {}),
+            }
+          }
+
+          // Both council stages run the same tool; only the question differs.
+          const approved = councilApproved()
+          const question = stage === 'review'
+            ? [
+              'Review the work below against the original request. Say what is missing, wrong, or unfinished.',
+              '',
+              `ORIGINAL REQUEST: ${input.query}`,
+              '',
+              ...(input.units ?? []).map(unit => [
+                `### ${unit.task.title} (${unit.seat})`,
+                unit.error === undefined ? unit.text : `FAILED: ${unit.error}`,
+              ].join(String.fromCharCode(10))),
+            ].join(String.fromCharCode(10))
+            : input.query
+          const council = await runCouncil({
+            query: question,
+            seats: seatsNow,
+            apiKey,
+            timeoutMs,
+            signal: exec.signal,
+            sequential: config.sequential,
+            planMode: config.planMode ?? 'council',
+            planOnly: !approved,
+            memory: resolveMemory(live().memoryDigest),
+            webMaxResults: config.webMaxResults ?? 0,
+            seatResearch: config.seatResearch !== false,
+            files: diskSeam(),
+            fileRoots: parseRoots(config.fileRoots),
+            ...(config.plannerSeat === undefined ? {} : { plannerSeat: config.plannerSeat }),
+            ...(approved && settingsNow.pendingPlanText !== undefined && settingsNow.pendingPlanText !== ''
+              ? { plan: settingsNow.pendingPlanText }
+              : {}),
+          })
+          if (council.phase === 'plan' && settingsNow.autoApprove !== true) {
+            await ctx.settings?.update(COUNCIL_NAMESPACE, {
+              pendingPlanId: randomUUID(),
+              pendingPlanQuery: question,
+              pendingPlanText: council.plan ?? '',
+              pendingPlanIssuedAt: Date.now(),
+              approvedPlanId: '',
+              approvedAt: 0,
+            } as never)
+          }
+          return {
+            report: renderMarkdown(council),
+            complete: council.phase === 'full',
+            ...(council.plan === undefined ? {} : { plan: council.plan }),
+            failures: [
+              ...(council.planFailures ?? []).map(failure => ({ seat: failure.seat, error: failure.error })),
+              ...council.drafts
+                .filter(draft => draft.error !== undefined)
+                .map(draft => ({ seat: draft.seat, error: String(draft.error) })),
+            ],
+          }
+        },
+      })
+
+      // The run IS the settings: every call writes it back, the hold included.
+      // That is what lets a resumed session pick the same stage up rather than
+      // start a chain the user already paid for.
+      await ctx.settings?.update(COUNCIL_NAMESPACE, {
+        pipelineId: result.phase === 'done' ? '' : result.state.id,
+        pipelineQuery: result.phase === 'done' ? '' : result.state.query,
+        pipelineStage: result.state.stage,
+        pipelinePlan: result.state.plan ?? '',
+        pipelineTasks: result.state.tasks === undefined ? '' : JSON.stringify(result.state.tasks),
+        pipelineUnits: result.state.units === undefined ? '' : JSON.stringify(result.state.units),
+        pipelineHoldDetail: result.state.hold?.detail ?? '',
+        pipelineHoldSeat: result.state.hold?.seat ?? '',
+        pipelineHoldResumeAt: result.state.hold?.resumeAt ?? 0,
+        pipelineHoldSource: result.state.hold?.source ?? '',
+      } as never)
+
+      process.stdout.write(`${result.report}${String.fromCharCode(10)}`)
+      return {
+        query: result.state.query,
+        stage: result.state.stage,
+        phase: result.phase,
+        report: result.report,
+        ...(result.state.hold === undefined ? {} : { resumeAt: result.state.hold.resumeAt }),
       }
     },
   }))

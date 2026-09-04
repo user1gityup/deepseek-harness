@@ -50,6 +50,13 @@ export type BudgetKey =
   | 'swarm.subscription'
   | 'swarm.metered'
   | 'swarm.noneEnabled'
+  | 'pipeline.title'
+  | 'pipeline.hint'
+  | 'pipeline.run'
+  | 'pipeline.continue'
+  | 'pipeline.held'
+  | 'pipeline.resumeNow'
+  | 'pipeline.placeholder'
   | 'swarm.meteredWarning'
   | 'approve.always'
   | 'approve.alwaysHint'
@@ -99,6 +106,13 @@ export const en: Record<BudgetKey, string> = {
   'approve.action': 'Approve',
   'approve.discard': 'Discard',
   'approve.awaitingMessage': 'Approved. Send a message to run the council.',
+  'pipeline.title': 'Pipeline',
+  'pipeline.hint': 'Council agrees the approach, the swarm runs it, the council reviews it. One stage per press.',
+  'pipeline.run': 'Run pipeline',
+  'pipeline.continue': 'Continue',
+  'pipeline.held': 'Held on quota — resuming in',
+  'pipeline.resumeNow': 'Resume now',
+  'pipeline.placeholder': 'What should the chain work on?',
   'swarm.toggleTitle': 'Swarm',
   'swarm.toggleLabel': 'Run approved work as a swarm',
   'swarm.toggleOn': 'Approved work is split across your seats and run in waves',
@@ -157,6 +171,13 @@ export const zh: Record<BudgetKey, string> = {
   'approve.action': '批准',
   'approve.discard': '丢弃',
   'approve.awaitingMessage': '已批准。发送一条消息即可运行议会。',
+  'pipeline.title': '流水线',
+  'pipeline.hint': '议会定方案，蜂群执行，议会复核。每次按下推进一个阶段。',
+  'pipeline.run': '运行流水线',
+  'pipeline.continue': '继续',
+  'pipeline.held': '额度用尽，暂停中，恢复倒计时',
+  'pipeline.resumeNow': '立即恢复',
+  'pipeline.placeholder': '这条链要处理什么？',
   'swarm.toggleTitle': '蜂群',
   'swarm.toggleLabel': '以蜂群方式执行已批准的工作',
   'swarm.toggleOn': '已批准的工作将按波次分配给你配置的席位',

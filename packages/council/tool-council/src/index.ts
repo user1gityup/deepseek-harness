@@ -27,6 +27,8 @@ import { projectCapacity, renderCapacity } from './capacity.ts'
 import { estimateRun, fetchModelPricing, parsePlanScale } from './estimate.ts'
 import { quotaReading, readClaudeUsage, startOfDay, startOfWeek } from './usage.ts'
 import { resolveOpenRouterKey, DEFAULT_KEY_ENV } from './credentials.ts'
+import { listPresets, removePreset, renderPresets, savePreset } from './presets.ts'
+import type { PresetMap } from './presets.ts'
 import { PIPELINE_STAGES, runPipeline, startPipeline } from './pipeline.ts'
 import type { PipelineStage, PipelineState } from './pipeline.ts'
 import { runCouncil } from './council.ts'
@@ -442,6 +444,17 @@ const PIPELINE_VALUE_SCHEMA = {
     report: { type: 'string', required: true },
     /** Epoch ms the run resumes at, when it is held on a spent allowance. */
     resumeAt: { type: 'integer' },
+  },
+} as const satisfies ValueSchemaSpec
+
+/** What one preset write reports back. */
+const PRESET_VALUE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    saved: { type: 'boolean', required: true },
+    id: { type: 'string', required: true },
+    report: { type: 'string', required: true },
   },
 } as const satisfies ValueSchemaSpec
 
@@ -1417,6 +1430,94 @@ export function apply(ctx: Context, config: Config = {}): void {
         phase: result.phase,
         report: result.report,
         ...(result.state.hold === undefined ? {} : { resumeAt: result.state.hold.resumeAt }),
+      }
+    },
+  }))
+
+  // -- save_pipeline_preset: the one settings key a model may write --
+  //
+  // Settings are otherwise closed to model-facing tools, and that closure is
+  // what makes the approval gate mean anything: a model that could write
+  // `approvedPlanId` could approve its own spending. A preset is the one thing
+  // worth an exception, because it is only TEXT the user later chooses to
+  // press — it authorises nothing and spends nothing on its own.
+  //
+  // The door is cut to that shape: presets.ts returns a new preset map and
+  // nothing else, and this writes exactly `pipelinePresets`. No approval slot
+  // is reachable from here, by design rather than by care.
+  ctx.tools.register(defineTool({
+    name: 'save_pipeline_preset',
+    description:
+      'Save a named, reusable pipeline run so the user can fire it from a button instead of retyping it. '
+      + 'Ids are `area/name` in lowercase kebab, such as `dsh/gate-audit`. '
+      + 'Saves the request only: it starts nothing, spends nothing, and approves nothing.',
+    parameters: {
+      id: { type: 'string', required: true, description: 'Preset id, `area/name` in lowercase kebab.' },
+      query: { type: 'string', description: 'The whole request the run should carry. Required unless removing.' },
+      name: { type: 'string', description: 'Button label. Defaults to the name half of the id.' },
+      autoAdvance: { type: 'boolean', description: 'Advance between stages without being asked. Approval gates still apply.' },
+      replace: { type: 'boolean', description: 'Permission to overwrite an id already in use.' },
+      remove: { type: 'boolean', description: 'Delete this preset instead of saving one.' },
+    },
+    output: {
+      schema: PRESET_VALUE_SCHEMA,
+      render: (_args: unknown, value: InferValue<typeof PRESET_VALUE_SCHEMA>) =>
+        [{ type: 'text' as const, text: value.report }],
+    },
+    async execute(args) {
+      const held = (live().pipelinePresets ?? {}) as PresetMap
+      const write = args.remove === true
+        ? removePreset(held, args.id)
+        : savePreset(
+          held,
+          args.id,
+          { name: args.name ?? '', query: args.query ?? '', ...(args.autoAdvance === undefined ? {} : { autoAdvance: args.autoAdvance }) },
+          args.replace === true,
+        )
+
+      if (write.problem !== undefined) {
+        return {
+          saved: false,
+          id: args.id,
+          report: [
+            '## Preset not saved',
+            '',
+            `> **!** ${write.problem}`,
+            '',
+            renderPresets(held),
+          ].join(String.fromCharCode(10)),
+        }
+      }
+
+      if (ctx.settings === undefined) {
+        return {
+          saved: false,
+          id: args.id,
+          report: '## Preset not saved\n\n> **!** the settings service is unavailable, so nothing could be written.',
+        }
+      }
+
+      await ctx.settings.update(COUNCIL_NAMESPACE, { pipelinePresets: write.presets } as never)
+      // Read back rather than trust the write: a settings update that did not
+      // take effect would otherwise be reported as a button the user does not
+      // have.
+      const after = (live().pipelinePresets ?? {}) as PresetMap
+      const landed = args.remove === true ? after[args.id] === undefined : after[args.id] !== undefined
+      if (!landed) {
+        return {
+          saved: false,
+          id: args.id,
+          report: `## Preset not saved\n\n> **!** the write did not take effect; settings hold ${String(listPresets(after).length)} preset(s).`,
+        }
+      }
+
+      const what = args.remove === true
+        ? `Removed \`${args.id}\`.`
+        : `${write.replaced === true ? 'Replaced' : 'Saved'} \`${args.id}\`. Reload DSH and it appears under **Saved runs**.`
+      return {
+        saved: true,
+        id: args.id,
+        report: ['## Saved runs', '', what, '', renderPresets(after)].join(String.fromCharCode(10)),
       }
     },
   }))

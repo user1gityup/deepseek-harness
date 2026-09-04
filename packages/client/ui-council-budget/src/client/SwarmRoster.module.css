@@ -77,7 +77,10 @@
 }
 
 .kind {
-  padding: 3px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
   font-size: 11px;
   line-height: 1;
   cursor: pointer;
@@ -85,6 +88,18 @@
   background: none;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 6px;
+}
+
+/* An indicator lamp per kind: red for a kind this worker will not take, green
+   and lit for one it will. The chip itself stays quiet so five of them in a row
+   read as a status strip rather than five competing buttons. */
+.kind::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dsw-alias-state-error-primary);
+  flex: none;
 }
 
 .kind:hover:not(:disabled) {
@@ -96,13 +111,37 @@
   opacity: 0.5;
 }
 
+/* Lit: the assignment is on. The lamp carries the state; the chip only lifts
+   its own surface enough to look pressed in. */
 .kindOn {
   color: var(--dsw-alias-label-primary);
-  background: var(--dsw-alias-interactive-bg-active);
+  background: var(--dsw-alias-interactive-bg-hover-solid);
   border-color: var(--dsw-alias-border-l3);
+}
+
+.kindOn::before {
+  background: var(--dsw-alias-state-success-primary);
+  box-shadow: 0 0 5px 1px var(--dsw-alias-state-success-primary);
+}
+
+.kindOn:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover-accent);
 }
 
 .warn {
   margin: 0;
   color: var(--dsw-alias-label-secondary);
+}
+
+/*
+ * The model a seat actually runs, shown beside its name so "which model is
+ * doing this" is answered in the roster rather than after the run. Only
+ * OpenRouter seats carry one; a CLI seat's model belongs to its own binary.
+ */
+.model {
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

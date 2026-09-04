@@ -190,6 +190,22 @@ export interface Config {
    * a chain that gets interrupted resumes where it stood. These slots hold no
    * approval of their own: each stage still passes its own tool's gate.
    */
+  /**
+   * Named, pre-written runs. A preset is the whole request already agreed, so
+   * firing one takes a click rather than typing the prompt again — and the
+   * wording is reviewed once, in settings, rather than retyped differently
+   * each time. Keyed by id, a dict for the same reason `swarmRoster` is: a
+   * bare object schema materialises an empty default and then fails its own
+   * required fields at boot.
+   */
+  pipelinePresets?: Record<string, {
+    name?: string
+    query?: string
+    /** Advance the chain without waiting to be asked between stages. */
+    autoAdvance?: boolean
+  }>
+  /** Set while a run should advance itself; written by the control that fired a preset. */
+  pipelineAuto?: boolean
   pipelineId?: string
   /** The request the whole chain serves, in the user's own words. */
   pipelineQuery?: string
@@ -332,6 +348,12 @@ export const Config: z<Config> = z.object({
   pendingSwarmIssuedAt: z.number(),
   approvedSwarmId: z.string(),
   approvedSwarmAt: z.number(),
+  pipelinePresets: z.dict(z.object({
+    name: z.string(),
+    query: z.string(),
+    autoAdvance: z.boolean(),
+  })).default({}),
+  pipelineAuto: z.boolean().default(false),
   pipelineId: z.string(),
   pipelineQuery: z.string(),
   pipelineStage: z.string(),
@@ -1277,6 +1299,20 @@ export function apply(ctx: Context, config: Config = {}): void {
                 approvedSwarmAt: 0,
               } as never)
             }
+            // Retire with empty sentinels, never `undefined`: a settings update
+            // leaves undefined keys unchanged, so a spent approval must not carry
+            // the next stage. Stage two approved a graph of workers; stage three
+            // is a council review, and it has to be asked for separately.
+            if (swarm.phase === 'full') {
+              await ctx.settings?.update(COUNCIL_NAMESPACE, {
+                pendingSwarmId: '',
+                pendingSwarmQuery: '',
+                pendingSwarmTasks: '',
+                pendingSwarmIssuedAt: 0,
+                approvedSwarmId: '',
+                approvedSwarmAt: 0,
+              } as never)
+            }
             return {
               report: swarm.report,
               complete: swarm.phase === 'full',
@@ -1328,6 +1364,18 @@ export function apply(ctx: Context, config: Config = {}): void {
               pendingPlanQuery: question,
               pendingPlanText: council.plan ?? '',
               pendingPlanIssuedAt: Date.now(),
+              approvedPlanId: '',
+              approvedAt: 0,
+            } as never)
+          }
+          // Same retirement on the council side: the approval that let stage one
+          // draft must not still be standing when stage three asks to review.
+          if (council.phase === 'full') {
+            await ctx.settings?.update(COUNCIL_NAMESPACE, {
+              pendingPlanId: '',
+              pendingPlanQuery: '',
+              pendingPlanText: '',
+              pendingPlanIssuedAt: 0,
               approvedPlanId: '',
               approvedAt: 0,
             } as never)

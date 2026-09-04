@@ -53,9 +53,36 @@ export function startPrompt(request: string): string {
   return `Run the pipeline tool on this request, one stage at a time: ${request}`
 }
 
+/** The prompt that abandons the run in progress and starts a fresh one. */
+export const RESTART_PROMPT = 'Restart the pipeline: call the pipeline tool with restart set to true.'
+
 /** The prompt that advances a run that is already in progress. */
 export const CONTINUE_PROMPT = 'Continue the pipeline — call the pipeline tool again to advance the next stage.'
 
+/**
+ * The area half of a preset id.
+ *
+ * Ids are `area/name` — `dsh/gate-audit`, `web/ship-landing`. The area is what
+ * makes a list of twenty scannable: sorting by id puts an area's runs together,
+ * and showing the area on the button says which project a name belongs to when
+ * two areas both have a `smoke-test`.
+ * @param id - the preset id.
+ * @returns the area, or '' when the id carries none.
+ */
+export function presetArea(id: string): string {
+  const cut = id.indexOf('/')
+  return cut <= 0 ? '' : id.slice(0, cut)
+}
+
+/**
+ * The name half of a preset id, used when a preset carries no display name.
+ * @param id - the preset id.
+ * @returns the name after the area, or the whole id.
+ */
+export function presetLeaf(id: string): string {
+  const cut = id.indexOf('/')
+  return cut < 0 ? id : id.slice(cut + 1)
+}
 /**
  * How long until a hold ends, worded for a person.
  * @param resumeAt - epoch ms.
@@ -86,12 +113,27 @@ export function PipelineControl({ t, settings, send }: PipelineControlProps): JS
   // A hold must reactivate ONCE. Without this the countdown reaching zero
   // would send the continue prompt on every tick.
   const fired = useRef<number>(0)
+  /** The stage this control has already sent a continue for. */
+  const advanced = useRef<string>('')
 
   const running = typeof section?.['pipelineId'] === 'string' && section['pipelineId'] !== ''
   const stage = typeof section?.['pipelineStage'] === 'string' ? section['pipelineStage'] : 'council'
   const resumeAt = typeof section?.['pipelineHoldResumeAt'] === 'number' ? section['pipelineHoldResumeAt'] : 0
   const held = resumeAt > 0
   const query = typeof section?.['pipelineQuery'] === 'string' ? section['pipelineQuery'] : ''
+  const auto = section?.['pipelineAuto'] === true
+
+  // Presets are written into settings — by hand, or by an assistant the user
+  // worked the wording out with. The panel only reads them, so a preset is
+  // reviewable in one place instead of being retyped into the composer.
+  const presets = Object.entries(
+    (section?.['pipelinePresets'] ?? {}) as Record<string, { name?: string; query?: string; autoAdvance?: boolean }>,
+  )
+    .filter(([, preset]) => typeof preset.query === 'string' && preset.query !== '')
+    // Sorted by id, and ids are `area/name`, so the list groups itself by area
+    // without anyone maintaining an order. A saved run is found by scanning,
+    // and scanning only works when neighbours are related.
+    .sort(([a], [b]) => a.localeCompare(b))
 
   // The clock only runs while something is actually counting down.
   useEffect(() => {
@@ -112,6 +154,25 @@ export function PipelineControl({ t, settings, send }: PipelineControlProps): JS
     fired.current = resumeAt
     go(CONTINUE_PROMPT)
   }, [held, now, resumeAt])
+
+  // Auto-advance: a preset that says so carries the chain from stage to stage
+  // without being asked. It fires once per stage — the ref is what stops a
+  // re-render from sending the same continue twice — and never while held,
+  // because a held run must not be poked at all until its window rolls over.
+  useEffect(() => {
+    if (!auto || !running || held || busy) return undefined
+    if (advanced.current === stage) return undefined
+    const timer = setTimeout(() => {
+      advanced.current = stage
+      go(CONTINUE_PROMPT)
+    }, 1_500)
+    return () => { clearTimeout(timer) }
+  }, [auto, running, held, busy, stage])
+
+  // The run is over: stop advancing, so the next manual run is manual.
+  useEffect(() => {
+    if (!running && auto) void settings.set('pipelineAuto', false)
+  }, [running, auto, settings])
 
   const index = STAGES.indexOf(stage as (typeof STAGES)[number])
   const position = index < 0 ? 1 : index + 1
@@ -160,7 +221,40 @@ export function PipelineControl({ t, settings, send }: PipelineControlProps): JS
             >
               {t('pipeline.continue')}
             </button>
+            <button
+              type="button"
+              className={css.action}
+              disabled={busy}
+              onClick={() => { go(RESTART_PROMPT) }}
+            >
+              {t('pipeline.restart')}
+            </button>
             <span className={css.query} title={query}>{query}</span>
+          </div>
+        )
+        : null}
+
+      {presets.length > 0 && !running
+        ? (
+          <div className={css.row}>
+            <span className={css.presetLabel}>{t('pipeline.presets')}</span>
+            {presets.map(([id, preset]) => (
+              <button
+                key={id}
+                type="button"
+                className={css.preset}
+                disabled={busy}
+                title={preset.query}
+                onClick={() => {
+                  void settings.set('pipelineAuto', preset.autoAdvance === true)
+                  advanced.current = ''
+                  go(startPrompt(preset.query ?? ''))
+                }}
+              >
+                {presetArea(id) === '' ? null : <span className={css.presetArea}>{presetArea(id)}</span>}
+                {preset.name === undefined || preset.name === '' ? presetLeaf(id) : preset.name}
+              </button>
+            ))}
           </div>
         )
         : null}

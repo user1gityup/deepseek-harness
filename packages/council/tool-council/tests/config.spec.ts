@@ -76,6 +76,26 @@ describe('auto-approve', () => {
     expect(resolved['approvedSwarmId']).toBeUndefined()
   })
 
+  it('validates the pipeline run state the chain persists between calls', () => {
+    expect(() => Config({
+      pipelineId: 'p1',
+      pipelineQuery: 'q',
+      pipelineStage: 'swarm',
+      pipelinePlan: 'the approach',
+      pipelineTasks: '[]',
+      pipelineUnits: '[]',
+      pipelineHoldDetail: 'usage limit reached',
+      pipelineHoldSeat: 'claude',
+      pipelineHoldResumeAt: 1,
+      pipelineHoldSource: 'stated',
+    })).not.toThrow()
+  })
+
+  it('starts with no run and no hold, so nothing resumes on a fresh install', () => {
+    const resolved = Config({}) as Record<string, unknown>
+    expect(resolved['pipelineId']).toBeUndefined()
+    expect(resolved['pipelineHoldResumeAt']).toBeUndefined()
+  })
   it('validates a swarm roster override without materialising empty kinds', () => {
     const resolved = Config({ swarmRoster: { kimi: { enabled: true } } }) as Record<string, unknown>
     const roster = resolved['swarmRoster'] as Record<string, Record<string, unknown>>

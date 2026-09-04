@@ -56,6 +56,8 @@ export type BudgetKey =
   | 'pipeline.continue'
   | 'pipeline.held'
   | 'pipeline.resumeNow'
+  | 'pipeline.presets'
+  | 'pipeline.restart'
   | 'pipeline.placeholder'
   | 'swarm.meteredWarning'
   | 'approve.always'
@@ -112,6 +114,8 @@ export const en: Record<BudgetKey, string> = {
   'pipeline.continue': 'Continue',
   'pipeline.held': 'Held on quota — resuming in',
   'pipeline.resumeNow': 'Resume now',
+  'pipeline.presets': 'Saved runs',
+  'pipeline.restart': 'Start over',
   'pipeline.placeholder': 'What should the chain work on?',
   'swarm.toggleTitle': 'Swarm',
   'swarm.toggleLabel': 'Run approved work as a swarm',
@@ -177,6 +181,8 @@ export const zh: Record<BudgetKey, string> = {
   'pipeline.continue': '继续',
   'pipeline.held': '额度用尽，暂停中，恢复倒计时',
   'pipeline.resumeNow': '立即恢复',
+  'pipeline.presets': '已保存的运行',
+  'pipeline.restart': '重新开始',
   'pipeline.placeholder': '这条链要处理什么？',
   'swarm.toggleTitle': '蜂群',
   'swarm.toggleLabel': '以蜂群方式执行已批准的工作',

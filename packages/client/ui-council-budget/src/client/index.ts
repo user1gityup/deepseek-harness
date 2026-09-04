@@ -161,13 +161,19 @@ export function apply(ctx: ClientContext): void {
       id: 'pipeline-control',
       order: 7,
       locale: NS,
-      inject: () => ({
+      inject: sessionId => ({
         settings: ctx.settingsScope.bind<Record<string, unknown>>({
           namespace: 'council',
           decode: section =>
             typeof section === 'object' && section !== null ? section as Record<string, unknown> : {},
         }),
-        send: async (text: string) => { await ctx.conversation.send(text) },
+        // The slot frame hands an id, not a context: `conversation.send` off the
+        // ROOT context throws, because a prompt has to be addressed to a session.
+        send: async (text: string) => {
+          const actx = ctx.sessions.scope(sessionId)
+          if (actx === undefined) throw new Error(`ui-council-budget: session "${String(sessionId)}" resolved no scope`)
+          await actx.conversation.send(text)
+        },
       }),
     },
     PipelineControl,

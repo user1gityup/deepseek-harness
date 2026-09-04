@@ -17,6 +17,8 @@ import { NS, en, zh, type BudgetKey } from './locales.ts'
 import { CouncilBudget } from './CouncilBudget.tsx'
 import { CouncilToggle } from './CouncilToggle.tsx'
 import { CouncilCallView } from './CouncilCallView.tsx'
+import { SwarmRoster } from './SwarmRoster.tsx'
+import { SwarmToggle } from './SwarmToggle.tsx'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -93,8 +95,58 @@ export function apply(ctx: ClientContext): void {
     CouncilCallView,
   ))
 
-  // Swarm switch and roster are withheld while the swarm itself is disabled:
-  // a control that changes nothing is worse than no control. Both components
-  // and their settings remain, so re-enabling is a matter of restoring these
-  // two registrations alongside the bundle rows.
+  // The swarm gate is the same control on a different call: the report and the
+  // Approve button behave identically, and only the settings keys differ, so
+  // the view reads which gate a call belongs to off its own marker.
+  ctx.slots.inject('tool.call.toolview', () => ctx.slots.register(
+    {
+      name: 'tool.call.toolview',
+      key: 'swarm',
+      locale: NS,
+      inject: () => ({
+        settings: ctx.settingsScope.bind<Record<string, unknown>>({
+          namespace: 'council',
+          decode: section =>
+            typeof section === 'object' && section !== null ? section as Record<string, unknown> : {},
+        }),
+      }),
+    },
+    CouncilCallView,
+  ))
+
+  // Swarm mode gets its own switch: it is a larger commitment than council
+  // mode, and burying it inside that one would hide the difference.
+  ctx.slots.register(
+    {
+      name: 'conversation.input.right',
+      id: 'swarm-toggle',
+      order: 6,
+      locale: NS,
+      inject: () => ({
+        settings: ctx.settingsScope.bind<Record<string, unknown>>({
+          namespace: 'council',
+          decode: section =>
+            typeof section === 'object' && section !== null ? section as Record<string, unknown> : {},
+        }),
+      }),
+    },
+    SwarmToggle,
+  )
+
+  ctx.slots.register(
+    {
+      name: 'conversation.input.dock',
+      id: 'swarm-roster',
+      order: 6,
+      locale: NS,
+      inject: () => ({
+        settings: ctx.settingsScope.bind<Record<string, unknown>>({
+          namespace: 'council',
+          decode: section =>
+            typeof section === 'object' && section !== null ? section as Record<string, unknown> : {},
+        }),
+      }),
+    },
+    SwarmRoster,
+  )
 }

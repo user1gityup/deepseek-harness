@@ -58,4 +58,27 @@ describe('auto-approve', () => {
     const resolved = Config({ autoApprove: true }) as Record<string, unknown>
     expect(resolved['autoApprove']).toBe(true)
   })
+
+  it('validates the swarm gate state, which the host resolves at the same moment', () => {
+    expect(() => Config({
+      pendingSwarmId: 's1',
+      pendingSwarmQuery: 'q',
+      pendingSwarmTasks: '[]',
+      pendingSwarmIssuedAt: 1,
+      approvedSwarmId: 's1',
+      approvedSwarmAt: 2,
+    })).not.toThrow()
+  })
+
+  it('leaves the swarm gate absent on a fresh install, so no run starts approved', () => {
+    const resolved = Config({}) as Record<string, unknown>
+    expect(resolved['pendingSwarmId']).toBeUndefined()
+    expect(resolved['approvedSwarmId']).toBeUndefined()
+  })
+
+  it('validates a swarm roster override without materialising empty kinds', () => {
+    const resolved = Config({ swarmRoster: { kimi: { enabled: true } } }) as Record<string, unknown>
+    const roster = resolved['swarmRoster'] as Record<string, Record<string, unknown>>
+    expect(roster['kimi']?.['enabled']).toBe(true)
+  })
 })

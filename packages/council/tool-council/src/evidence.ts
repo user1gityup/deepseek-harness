@@ -133,20 +133,28 @@ export const MAX_QUERIES_TOTAL = 8
  * 25x per call for the same information.
  * @param query - the user's question.
  * @param plan - the agreed approach, when there is one.
+ * @param extra - a further request section, such as the one asking for files.
+ *   Empty when the host grants nothing beyond search.
  * @returns the prompt.
  */
-export function researchPrompt(query: string, plan: string | undefined): string {
+export function researchPrompt(query: string, plan: string | undefined, extra = ''): string {
   const approach = plan === undefined || plan === '' ? '' : `
 
 AGREED APPROACH:
 ${plan}`
+  // With a second kind of request in play the reply is no longer "nothing but
+  // query lines", and a seat held to that wording drops its file requests to
+  // obey it.
+  const only = extra === '' ? ' nothing but' : ''
   return `Before answering, say what you would need to look up.
 
-Reply with nothing but query lines, at most ${String(MAX_QUERIES_PER_SEAT)}, each starting with SEARCH: and written as you would type it into a search engine.
+Reply with${only} query lines, at most ${String(MAX_QUERIES_PER_SEAT)}, each starting with SEARCH: and written as you would type it into a search engine.
 
 SEARCH: <query>
 
-Ask only for things a search could settle — current figures, versions, prices, dates, whether a library still exists. Do not ask for opinions or for anything you already know. If you need nothing looked up, reply with exactly: NONE${approach}
+Ask only for things a search could settle — current figures, versions, prices, dates, whether a library still exists. Do not ask for opinions or for anything you already know.${extra}
+
+If you need nothing at all, reply with exactly: NONE${approach}
 
 QUESTION:
 ${query}`

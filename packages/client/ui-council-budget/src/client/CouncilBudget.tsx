@@ -13,6 +13,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { ISessions, SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 import { project, usd } from './capacity.ts'
 import type { PanelSeat, Price, Subscription } from './capacity.ts'
+import { seatsFrom } from './capacity.ts'
 import { NS } from './locales.ts'
 import css from './CouncilBudget.module.css'
 
@@ -28,47 +29,8 @@ export type SettingsFace = SettingsScope<Record<string, unknown>>
 /** localStorage slot for the OpenRouter key, shared with the monitor panel. */
 const KEY_STORAGE = 'dsh:openrouter-monitor:api-key'
 
-/**
- * Seats shipped by the council, mirrored here for display before any run.
- *
- * DUPLICATED from the host's DEFAULT_SEATS in `tool-council/src/seats.ts`,
- * which is the source of truth. The client and host faces do not share a
- * module, so this list is kept in step by hand — and a seat added there but
- * not here is simply invisible in this panel, with no error to say so. That
- * has already happened once. Change both, or neither.
- */
-const DEFAULT_SEATS: readonly PanelSeat[] = [
-  { id: 'claude', name: 'Claude', transport: 'cli', enabled: true },
-  // Free Claude ships disabled: it needs the local proxy running, and a seat
-  // that fails on every run of a fresh install is worse than one switched on
-  // deliberately.
-  { id: 'free-claude', name: 'Free Claude', transport: 'cli', enabled: false },
-  { id: 'openai', name: 'OpenAI', transport: 'cli', enabled: true },
-  { id: 'kimi', name: 'Kimi', transport: 'openrouter', model: 'moonshotai/kimi-k2', enabled: true },
-  { id: 'deepseek', name: 'DeepSeek v4', transport: 'openrouter', model: 'deepseek/deepseek-v4-pro', enabled: true },
-]
-
 /** The council's tools, listed so they can be seen and switched off. */
-const TOOLS = ['council', 'council_capacity', 'memory_write', 'memory_recall', 'memory_forget'] as const
-
-/** Read the seat roster out of the stored settings section. */
-function seatsFrom(section: Record<string, unknown> | undefined): readonly PanelSeat[] {
-  const overrides = (section?.['seats'] ?? {}) as Record<string, { enabled?: boolean; model?: string }>
-  const extras = (section?.['extraSeats'] ?? {}) as Record<string, { name?: string; model?: string; enabled?: boolean }>
-  const base = DEFAULT_SEATS.map(seat => ({
-    ...seat,
-    enabled: overrides[seat.id]?.enabled ?? seat.enabled,
-    model: overrides[seat.id]?.model ?? seat.model,
-  }))
-  const added: PanelSeat[] = Object.entries(extras).map(([id, extra]) => ({
-    id,
-    name: extra.name ?? id,
-    transport: 'openrouter' as const,
-    model: extra.model,
-    enabled: extra.enabled ?? true,
-  }))
-  return [...base, ...added]
-}
+const TOOLS = ['council', 'swarm', 'council_capacity', 'memory_write', 'memory_recall', 'memory_forget'] as const
 
 /** Fold the harness's own session projections into observed work. */
 function useObserved(sessions: ISessions): { outputTokens: number; inputTokens: number; sessions: number } {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { assignWorkers, defaultRoster, inferKind } from '../src/roster.ts'
+import { assignWorkers, defaultRoster, inferKind, seatRoster } from '../src/roster.ts'
+import type { SeatConfig } from '../src/seats.ts'
 import type { Worker } from '../src/roster.ts'
 import type { SubTask } from '../src/decompose.ts'
 
@@ -107,5 +108,58 @@ describe('defaultRoster', () => {
 
   it('is empty when nothing is registered', () => {
     expect(defaultRoster([])).toEqual([])
+  })
+})
+
+describe('seatRoster', () => {
+  const seats: readonly SeatConfig[] = [
+    { id: 'claude', name: 'Claude', transport: 'cli', enabled: true },
+    { id: 'free-claude', name: 'Free Claude', transport: 'cli', enabled: false },
+    { id: 'kimi', name: 'Kimi', transport: 'openrouter', model: 'moonshotai/kimi-k2', enabled: true },
+  ]
+
+  it('offers every configured seat as a worker, in seat order', () => {
+    expect(seatRoster(seats).map(worker => worker.provider))
+      .toEqual(['claude', 'free-claude', 'kimi'])
+  })
+
+  it('prices a CLI seat as included and an OpenRouter seat as metered', () => {
+    const roster = seatRoster(seats)
+    expect(roster.map(worker => worker.costClass)).toEqual(['included', 'included', 'metered'])
+  })
+
+  it('starts a seat in the swarm the way it starts on the council', () => {
+    expect(seatRoster(seats).map(worker => worker.enabled)).toEqual([true, false, true])
+  })
+
+  it('lets a swarm override switch a seat on without touching the council', () => {
+    const roster = seatRoster(seats, { 'free-claude': { enabled: true } })
+    expect(roster.find(worker => worker.provider === 'free-claude')?.enabled).toBe(true)
+    // The seat itself is untouched: the override is swarm-only state.
+    expect(seats[1]?.enabled).toBe(false)
+  })
+
+  it('narrows a seat to the kinds the override names', () => {
+    const roster = seatRoster(seats, { kimi: { kinds: ['research', 'docs'] } })
+    expect(roster.find(worker => worker.provider === 'kimi')?.kinds).toEqual(['research', 'docs'])
+  })
+
+  it('drops a kind the roster does not recognise rather than trusting it', () => {
+    const roster = seatRoster(seats, { kimi: { kinds: ['research', 'nonsense'] } })
+    expect(roster.find(worker => worker.provider === 'kimi')?.kinds).toEqual(['research'])
+  })
+
+  it('assigns real work across the seat roster', () => {
+    const plan = assignWorkers(
+      [{ id: 'a', title: 'implement the parser', detail: '', dependsOn: [] }],
+      seatRoster(seats),
+    )
+    // A CLI seat is `included`, so it wins the tie against the metered one.
+    expect(plan.assignments[0]?.provider).toBe('claude')
+    expect(plan.unassigned).toEqual([])
+  })
+
+  it('is empty when no seat is configured, rather than inventing a worker', () => {
+    expect(seatRoster([])).toEqual([])
   })
 })

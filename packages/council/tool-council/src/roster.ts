@@ -15,6 +15,7 @@
 
 import type { CostClass } from './execution-cost.ts'
 import type { SubTask } from './decompose.ts'
+import type { SeatConfig } from './seats.ts'
 
 /** Kinds of work a unit can be, used only to match workers to units. */
 export const workKinds = ['code', 'tests', 'docs', 'research', 'review', 'any'] as const
@@ -24,7 +25,10 @@ export type WorkKind = (typeof workKinds)[number]
 
 /** One configured worker in the swarm roster. */
 export interface Worker {
-  /** Subagent provider name this worker runs on. */
+  /**
+   * Routing key this worker runs on: a council seat id for a seat-backed
+   * roster, a subagent provider name for a provider-backed one.
+   */
   readonly provider: string
   /** Display name for the panel. */
   readonly name: string
@@ -182,6 +186,18 @@ export function defaultRoster(available: readonly string[]): readonly Worker[] {
       kinds: ['code', 'tests', 'any'],
     },
     {
+      provider: 'free-claude',
+      name: 'Free Claude',
+      // Off on a fresh install: it needs the local proxy running, and a worker
+      // that fails every unit is worse than one the user switches on.
+      enabled: false,
+      // `included` because nothing is billed per token for it. It sorts behind
+      // `claude-code` on a tie only because the names order that way, not
+      // because the subscription is cheaper.
+      costClass: 'included',
+      kinds: ['code', 'tests', 'docs', 'research', 'review', 'any'],
+    },
+    {
       provider: 'spawn',
       name: 'In-process',
       enabled: false,
@@ -191,3 +207,44 @@ export function defaultRoster(available: readonly string[]): readonly Worker[] {
   ]
   return known.filter(worker => available.includes(worker.provider))
 }
+
+/**
+ * The swarm roster built from the council's own seats.
+ *
+ * The workers a swarm may use ARE the seats the user configured. There is no
+ * second registry to keep in step and no worker that exists only in the swarm:
+ * re-point a seat's model, add an OpenRouter seat, switch one off, and the
+ * swarm sees exactly that. `swarmRoster` overrides then say which of those
+ * seats may take work and which kinds, without touching whether the seat sits
+ * on the council — wanting a model to debate is not the same as wanting it to
+ * carry a unit.
+ *
+ * A CLI seat bills a subscription already paid for, so it counts as `included`
+ * and wins ties; an OpenRouter seat is metered and picks up what is left.
+ * @param seats - every configured seat, shipped and user-added.
+ * @param overrides - per-seat swarm state, keyed by seat id.
+ * @returns the roster, in seat order.
+ */
+export function seatRoster(
+  seats: readonly SeatConfig[],
+  overrides: Readonly<Record<string, { enabled?: boolean | undefined; kinds?: readonly string[] | undefined }>> = {},
+): readonly Worker[] {
+  return seats.map((seat) => {
+    const override = overrides[seat.id]
+    const kinds = override?.kinds === undefined
+      ? DEFAULT_SEAT_KINDS
+      : override.kinds.filter((kind): kind is WorkKind => (workKinds as readonly string[]).includes(kind))
+    return {
+      provider: seat.id,
+      name: seat.name,
+      // Absent an override a seat joins the swarm the way it joined the
+      // council, so a fresh install needs no second setup pass.
+      enabled: override?.enabled ?? seat.enabled,
+      costClass: seat.transport === 'cli' ? 'included' : 'metered',
+      kinds,
+    }
+  })
+}
+
+/** Kinds a seat takes when the user has not narrowed it. */
+const DEFAULT_SEAT_KINDS: readonly WorkKind[] = ['code', 'tests', 'docs', 'research', 'review', 'any']

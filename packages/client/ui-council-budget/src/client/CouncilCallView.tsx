@@ -26,16 +26,42 @@ import css from './CouncilCallView.module.css'
 /** Props for the council tool view. */
 export type CouncilCallViewProps = ToolCallViewProps & { settings: SettingsFace }
 
+/** Which gate a call's plan belongs to. */
+type GateKind = 'council' | 'swarm' | 'propose'
+
+/** Settings keys one gate is held in. */
+interface GateKeys {
+  readonly held: string
+  readonly approvedId: string
+  readonly approvedAt: string
+}
+
+/**
+ * The three gates keep separate state on purpose.
+ *
+ * A council approval must never authorise a swarm run, or a proposing round,
+ * or the other way round: they cost differently and do different things, and
+ * one approval standing for all three would let a user who approved a debate
+ * get a graph of workers, or every seat writing code, instead.
+ */
+const GATES: Record<GateKind, GateKeys> = {
+  council: { held: 'pendingPlanId', approvedId: 'approvedPlanId', approvedAt: 'approvedAt' },
+  swarm: { held: 'pendingSwarmId', approvedId: 'approvedSwarmId', approvedAt: 'approvedSwarmAt' },
+  propose: { held: 'pendingProposeId', approvedId: 'approvedProposeId', approvedAt: 'approvedProposeAt' },
+}
+
 /** What this view could read off a settled call. */
 interface CallContent {
   /** Report text with the marker removed. */
   readonly report: string
   /** Plan this call issued, when it issued one. */
   readonly planId?: string | undefined
+  /** Which gate that plan is held at. */
+  readonly kind: GateKind
 }
 
 /** Marker the host appends so a call can name the plan it issued. */
-const PLAN_MARKER = /<!--council-plan:([0-9a-f-]{16,})-->/i
+const PLAN_MARKER = /<!--(council|swarm|propose)-plan:([0-9a-f-]{16,})-->/i
 
 /**
  * Read the council's report and plan id off a settled call.
@@ -61,11 +87,13 @@ function readCall(block: unknown): CallContent | undefined {
   if (text === '') return undefined
   const found = PLAN_MARKER.exec(text)
   const report = text.replace(PLAN_MARKER, '').trimEnd()
-  return found === null ? { report } : { report, planId: found[1] }
+  if (found === null) return { report, kind: 'council' }
+  return { report, kind: found[1] === 'swarm' ? 'swarm' : 'council', planId: found[2] }
 }
 
 /**
- * Council tool view: the report, plus approval when this call's plan is live.
+ * Council and swarm tool view: the report, plus approval when this call's plan
+ * is live.
  * @param props - the settled call and the council settings scope.
  * @returns the rendered call.
  */
@@ -80,8 +108,9 @@ export function CouncilCallView({ block, settings }: CouncilCallViewProps): JSX.
 
   const section = snapshot.value
   const callPlanId = parsed.planId
-  const heldId = section?.['pendingPlanId']
-  const approvedId = section?.['approvedPlanId']
+  const keys = GATES[parsed.kind]
+  const heldId = section?.[keys.held]
+  const approvedId = section?.[keys.approvedId]
   const autoApprove = section?.['autoApprove'] === true
 
   // Only the call whose plan is still the held one may be approved. An older
@@ -114,8 +143,8 @@ export function CouncilCallView({ block, settings }: CouncilCallViewProps): JSX.
               onClick={() => {
                 // Order matters: the id says WHICH plan was approved, and the
                 // timestamp is what the second factor is measured against.
-                void settings.set('approvedPlanId', callPlanId)
-                void settings.set('approvedAt', Date.now())
+                void settings.set(keys.approvedId, callPlanId)
+                void settings.set(keys.approvedAt, Date.now())
               }}
             >
               {t_('approve')}
@@ -123,7 +152,7 @@ export function CouncilCallView({ block, settings }: CouncilCallViewProps): JSX.
             <button
               type="button"
               className={css.discard}
-              onClick={() => { void settings.set('pendingPlanId', '') }}
+              onClick={() => { void settings.set(keys.held, '') }}
             >
               {t_('discard')}
             </button>

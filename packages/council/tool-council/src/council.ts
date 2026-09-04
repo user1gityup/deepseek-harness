@@ -14,6 +14,8 @@ import type { SeatConfig, SeatReply } from './seats.ts'
 import { auditDraft } from './verify.ts'
 import type { DraftAudit, FetchSeam } from './verify.ts'
 import { gatherEvidence, gatherRequested, parseSearchRequests, researchPrompt } from './evidence.ts'
+import type { FileSeam } from './files.ts'
+import { gatherFiles, parseReadRequests, readRequestSection } from './files.ts'
 import type { Evidence, SearchSeam } from './evidence.ts'
 import { askSeat } from './seats.ts'
 
@@ -194,6 +196,16 @@ export interface RunOptions {
    * where seats state their queries costs anything.
    */
   readonly seatResearch?: boolean | undefined
+  /**
+   * File seam used to serve the paths seats ask for. A seat never reads for
+   * itself; it names a path and this reads it, or refuses.
+   */
+  readonly files?: FileSeam | undefined
+  /**
+   * Absolute directories the seats may be shown files from. Empty — the
+   * default — means no seat is told it can ask for a file at all.
+   */
+  readonly fileRoots?: readonly string[] | undefined
 }
 
 /** Prompt for the planning round. */
@@ -677,25 +689,45 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
   // seat, and the searches themselves go through the seam's subscription route
   // for nothing — where giving every seat its own metered web plugin costs
   // roughly 25x per call for the same information.
+  //
+  // The same round buys file reads. A seat has no filesystem either, and the
+  // fix is the same shape: it names a path, the host reads it inside the roots
+  // the user granted, and every seat is shown the result. Folding it into this
+  // round rather than adding another one is what keeps it nearly free — the
+  // seats are already being asked what they need.
+  const fileRoots = options.fileRoots ?? []
+  const canRead = options.files !== undefined && fileRoots.length > 0
   let researched: Awaited<ReturnType<typeof gatherRequested>>
-  if (options.seatResearch === true && options.web !== undefined && active.length > 0) {
+  let fileEvidence: Awaited<ReturnType<typeof gatherFiles>>
+  const canSearch = options.seatResearch === true && options.web !== undefined
+  if ((canSearch || canRead) && active.length > 0) {
     const asks = await fanOut(
       active.map(seat => () =>
         reporting(
           seat,
           'plan',
-          askSeat(seat, researchPrompt(options.query, plan), options.apiKey, options.signal, options.timeoutMs, options.memory),
+          askSeat(seat, researchPrompt(options.query, plan, canRead ? readRequestSection(fileRoots) : ''), options.apiKey, options.signal, options.timeoutMs, options.memory),
           spend,
           emit,
         )),
       sequential,
     )
-    const requests = asks
-      .filter(ask => ask.error === undefined && ask.text !== '')
-      .map(ask => ({ seat: ask.seat, queries: parseSearchRequests(ask.text) }))
-      .filter(request => request.queries.length > 0)
-    if (requests.length > 0) {
-      researched = await gatherRequested(options.web, requests, options.signal)
+    const answered = asks.filter(ask => ask.error === undefined && ask.text !== '')
+    if (canSearch) {
+      const requests = answered
+        .map(ask => ({ seat: ask.seat, queries: parseSearchRequests(ask.text) }))
+        .filter(request => request.queries.length > 0)
+      if (requests.length > 0) {
+        researched = await gatherRequested(options.web, requests, options.signal)
+      }
+    }
+    if (canRead) {
+      const wanted = answered
+        .map(ask => ({ seat: ask.seat, paths: parseReadRequests(ask.text) }))
+        .filter(request => request.paths.length > 0)
+      if (wanted.length > 0) {
+        fileEvidence = await gatherFiles(options.files, fileRoots, wanted, options.signal)
+      }
     }
   }
 
@@ -709,9 +741,20 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
   // Seat-directed results beat one generic search: they answer what the seats
   // said they needed. Fall back to the single search only when nothing was
   // asked for, or when the research round is switched off.
-  const evidence = researched ?? (needsTools && !online
+  const searched = researched ?? (needsTools && !online
     ? await gatherEvidence(options.web, options.query, options.signal)
     : undefined)
+  // Files ride in the same block as the searches, so every place that already
+  // hands a seat its evidence hands it the source too, with no further change.
+  // Sources stay the search urls: a local path is not a citation.
+  const evidence = fileEvidence === undefined
+    ? searched
+    : {
+      block: searched === undefined
+        ? fileEvidence.block
+        : `${searched.block}${String.fromCharCode(10)}${String.fromCharCode(10)}${fileEvidence.block}`,
+      urls: searched?.urls ?? [],
+    }
   const drafts = await fanOut(
     active.map(seat => () =>
       reporting(

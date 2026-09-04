@@ -54,10 +54,58 @@ export function decomposePrompt(
   answer: string,
   providers: readonly string[],
 ): string {
-  const list = providers.length === 0 ? '(none registered)' : providers.join(', ')
   return `An approach has been agreed. Break it into units of work that can run in parallel.
 
-Reply with ONE fenced json block and nothing else. It must be an array of objects with exactly these fields:
+${shape(providers)}
+
+ORIGINAL REQUEST:
+${query}
+
+AGREED APPROACH:
+${answer}`
+}
+
+/**
+ * Prompt asking for a decomposition of a request no council has discussed.
+ *
+ * The council path decomposes an answer the seats already agreed on. This one
+ * has no such answer: the user asked for work directly and wants it split and
+ * run. The split therefore has to be read out of the request itself, which is
+ * why the prompt says so rather than leaving the model to infer an approach
+ * and quietly decompose something nobody asked for.
+ * @param query - what the user asked for.
+ * @param providers - worker names a unit may name.
+ * @returns the prompt.
+ */
+export function directDecomposePrompt(
+  query: string,
+  providers: readonly string[],
+): string {
+  return `Break the request below into units of work that can run in parallel.
+
+No approach has been agreed and no plan exists yet. Read the request as it
+stands and split the work it actually asks for. Do not invent scope it does
+not ask for, and do not answer it here — this step only divides it up.
+
+${shape(providers)}
+
+REQUEST:
+${query}`
+}
+
+/**
+ * The reply shape and the rules, shared by both decomposition prompts.
+ *
+ * One copy because the two prompts differ only in what they are decomposing:
+ * a wording fix applied to one and not the other is the kind of drift that
+ * shows up as a graph that parses from the council path and not the direct
+ * one.
+ * @param providers - worker names a unit may name.
+ * @returns the shared section of the prompt.
+ */
+function shape(providers: readonly string[]): string {
+  const list = providers.length === 0 ? '(none registered)' : providers.join(', ')
+  return `Reply with ONE fenced json block and nothing else. It must be an array of objects with exactly these fields:
   id        lower-kebab-case, unique, stable
   title     one line
   detail    everything the worker needs, assuming it has NOT read this conversation
@@ -69,13 +117,7 @@ Rules that matter more than completeness:
 - Two units must never edit the same file. Split by file or by layer, not by task type.
 - A graph where every unit depends on another is broken: something must be startable.
 - Prefer fewer, larger units over many tiny ones.
-- At most ${String(MAX_TASKS)} units.
-
-ORIGINAL REQUEST:
-${query}
-
-AGREED APPROACH:
-${answer}`
+- At most ${String(MAX_TASKS)} units.`
 }
 
 /**

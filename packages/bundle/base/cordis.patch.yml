@@ -229,6 +229,12 @@
     - id: tool-council
       name: '@deepseek-ai/dsh-tool-council'
 
+    # Publishes the Claude Code subscription quota for the browser panel.
+    # Boot only reads the status line's cache file; a live `/usage` call
+    # costs a request against the quota, so it waits for a button press.
+    - id: quota-claude
+      name: '@deepseek-ai/dsh-quota-claude'
+
     - id: fs-observation-policy
       name: '@deepseek-ai/dsh-fs-observation-policy'
 
@@ -351,9 +357,11 @@
     # ask before writing. That is the property that makes a swarm safe to run
     # at all, and it is why these are mounted rather than the Lead simply being
     # escalated.
-    # Disabled pending the execution-approval gate. Mounting these exposes
-    # spawn_teammate to the model, which could then create workers without
-    # being asked — the tools stay built and tested, but out of reach.
+    # Kept unmounted. The swarm that ships runs the COUNCIL's seats through the
+    # `swarm` tool in tool-council, behind its own two-factor approval gate;
+    # nothing on that path calls spawn_teammate. Mounting these would expose
+    # spawn_teammate to the model, which could then create workers unasked —
+    # a second, ungated way to spend. They stay built and tested, out of reach.
     - id: agent-team
       name: '@deepseek-ai/dsh-experimental-agent-team'
       disabled: true
@@ -378,6 +386,31 @@
       config:
         providerName: claude-code
         permissionMode: dontAsk
+
+    # The same Claude Code binary as a SECOND worker, routed through the local
+    # Free Claude Code proxy so its tokens never draw on the subscription. It
+    # mirrors the council's `free-claude` seat exactly: ANTHROPIC_BASE_URL keeps
+    # the request off Anthropic, and CLAUDE_CONFIG_DIR gives it its own config
+    # and credentials so it cannot silently fall back to the logged-in
+    # subscription — the outcome it exists to avoid.
+    #
+    # Registered whether or not the proxy is up; a worker that cannot reach the
+    # proxy fails its own unit rather than the host's boot. The roster ships it
+    # switched off for the same reason the seat is off by default.
+    - id: subagent-free-claude
+      name: '@deepseek-ai/dsh-subagent-claude-code'
+      disabled: true
+      config:
+        providerName: free-claude
+        permissionMode: dontAsk
+        env:
+          ANTHROPIC_BASE_URL: 'http://127.0.0.1:8082'
+          ANTHROPIC_AUTH_TOKEN: 'freecc'
+          CLAUDE_CONFIG_DIR: !!js (process.env.USERPROFILE ?? process.env.HOME) + '/.dsh/free-claude-home'
+          CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1'
+          DISABLE_AUTOUPDATER: '1'
+          DISABLE_FEEDBACK_COMMAND: '1'
+          DISABLE_ERROR_REPORTING: '1'
 
     - id: workflow-worker-thread
       name: '@deepseek-ai/dsh-workflow-worker-thread'

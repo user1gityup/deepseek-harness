@@ -297,6 +297,9 @@
     - id: ui-openrouter-monitor
       name: '@deepseek-ai/dsh-client-ui-openrouter-monitor'
 
+    - id: ui-claude-quota
+      name: '@deepseek-ai/dsh-client-ui-claude-quota'
+
     - id: ui-council-budget
       name: '@deepseek-ai/dsh-client-ui-council-budget'
 

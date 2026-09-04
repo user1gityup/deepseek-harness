@@ -114,6 +114,7 @@
     "@deepseek-ai/schemastery": "workspace:^",
     "commander": "^15.0.0",
     "open": "^11.0.0",
+    "@deepseek-ai/dsh-client-ui-claude-quota": "workspace:^",
     "@deepseek-ai/dsh-client-ui-council-budget": "workspace:^"
   },
   "peerDependencies": {

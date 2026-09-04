@@ -280,6 +280,7 @@
     { "path": "./packages/experimental/agent-team" },
     { "path": "./packages/experimental/tool-agent-team" },
     { "path": "./packages/council/tool-council" },
+    { "path": "./packages/quota/quota-claude" },
     { "path": "./packages/memory/agent-memory" },
     { "path": "./packages/web/web-search-cli" },
     { "path": "./packages/workflow/workflow" },

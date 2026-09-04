@@ -28,6 +28,11 @@ import { estimateRun, fetchModelPricing, parsePlanScale } from './estimate.ts'
 import { quotaReading, readClaudeUsage, startOfDay, startOfWeek } from './usage.ts'
 import { resolveOpenRouterKey, DEFAULT_KEY_ENV } from './credentials.ts'
 import { runCouncil } from './council.ts'
+import { runSwarm } from './swarm.ts'
+import { diskSeam, parseRoots } from './files.ts'
+import { diskWriteSeam } from './writes.ts'
+import { runPropose } from './propose.ts'
+import type { SubTask } from './decompose.ts'
 import { renderMarkdown } from './markdown.ts'
 import { renderReport } from './report.ts'
 import { DEFAULT_SEATS } from './seats.ts'
@@ -145,6 +150,54 @@ export interface Config {
   /** When the Approve control was pressed. */
   approvedAt?: number
   /**
+   * The swarm's half of the same gate, kept in its own slots.
+   *
+   * A council approval must not authorise a swarm run: they cost differently
+   * and do different things. Sharing one set of slots would mean approving a
+   * debate and getting a graph of workers.
+   */
+  pendingSwarmId?: string
+  /** The request that graph serves, shown on the Approve control. */
+  pendingSwarmQuery?: string
+  /**
+   * The approved graph itself, as JSON, run verbatim once approved.
+   *
+   * Stored rather than re-derived: decomposing again would produce a different
+   * graph from the one the user read, so the approval would carry work nobody
+   * saw. It also means approval costs nothing — the planning call was paid for
+   * before the gate.
+   */
+  pendingSwarmTasks?: string
+  /** When the graph was issued, so a stale approval can be rejected. */
+  pendingSwarmIssuedAt?: number
+  /** Graph id a human approved, written only by the Approve control. */
+  approvedSwarmId?: string
+  /** When the swarm's Approve control was pressed. */
+  approvedSwarmAt?: number
+  /**
+   * The proposing round's half of the same gate, in its own slots again.
+   *
+   * A proposing round spends a long writing call per seat plus a vote per
+   * seat, so it is the most expensive of the three and must be approved on its
+   * own terms rather than inheriting either of the others.
+   */
+  pendingProposeId?: string
+  /** The change the seats would each write, shown on the Approve control. */
+  pendingProposeTask?: string
+  /** Run id, so the approved run writes where the plan said it would. */
+  pendingProposeRunId?: string
+  /** When the round was issued, so a stale approval can be rejected. */
+  pendingProposeIssuedAt?: number
+  /** Round id a human approved, written only by the Approve control. */
+  approvedProposeId?: string
+  /** When the proposing round's Approve control was pressed. */
+  approvedProposeAt?: number
+  /**
+   * Directory under which each seat's own tree is created, one per run and
+   * seat. Defaults to `swarm-work` beside the other DSH state.
+   */
+  workRoot?: string
+  /**
    * Skip the per-run approval gate. Off by default, and only a person can set
    * it: the model has no settings-writing tool, so it cannot grant itself
    * standing permission to spend.
@@ -168,6 +221,16 @@ export interface Config {
    * this is the cheap way to give every seat live information.
    */
   seatResearch?: boolean
+  /**
+   * Directories whose files seats may ask to be shown, comma-separated.
+   *
+   * A seat never reads for itself: it names a path in the research round and
+   * the host reads it, only inside these roots. Empty — the default — means no
+   * seat is told it can ask, so nothing is readable until a person says which
+   * directories. One flat string rather than an array because a nested
+   * schemastery default materialises an empty object and fails at boot.
+   */
+  fileRoots?: string
   webMaxResults?: number
   planMode?: 'single' | 'council'
   swarmMode?: boolean
@@ -235,8 +298,22 @@ export const Config: z<Config> = z.object({
   pendingPlanIssuedAt: z.number(),
   approvedPlanId: z.string(),
   approvedAt: z.number(),
+  pendingSwarmId: z.string(),
+  pendingSwarmQuery: z.string(),
+  pendingSwarmTasks: z.string(),
+  pendingSwarmIssuedAt: z.number(),
+  approvedSwarmId: z.string(),
+  approvedSwarmAt: z.number(),
+  pendingProposeId: z.string(),
+  pendingProposeTask: z.string(),
+  pendingProposeRunId: z.string(),
+  pendingProposeIssuedAt: z.number(),
+  approvedProposeId: z.string(),
+  approvedProposeAt: z.number(),
+  workRoot: z.string(),
   autoApprove: z.boolean().default(false),
   seatResearch: z.boolean().default(true),
+  fileRoots: z.string(),
   webMaxResults: z.natural().default(0),
   planMode: z.union([z.const('single'), z.const('council')]).default('council'),
   swarmMode: z.boolean().default(false),
@@ -277,6 +354,38 @@ const COUNCIL_VALUE_SCHEMA = {
   },
 } as const satisfies ValueSchemaSpec
 
+
+/** What one swarm call reports back. */
+const SWARM_VALUE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    query: { type: 'string', required: true },
+    phase: { type: 'string', required: true },
+    report: { type: 'string', required: true },
+    units: { type: 'integer', required: true },
+    ran: { type: 'integer', required: true },
+    failures: { type: 'array', required: true, items: { type: 'string' } },
+    /** Graph this call issued, when it stopped at the gate. */
+    planId: { type: 'string' },
+  },
+} as const satisfies ValueSchemaSpec
+
+/** What one proposing round reports back. */
+const PROPOSE_VALUE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    task: { type: 'string', required: true },
+    phase: { type: 'string', required: true },
+    report: { type: 'string', required: true },
+    candidates: { type: 'integer', required: true },
+    /** Seat whose version was selected, when the vote settled. */
+    winner: { type: 'string' },
+    /** Round this call issued, when it stopped at the gate. */
+    planId: { type: 'string' },
+  },
+} as const satisfies ValueSchemaSpec
 
 /** Capacity projection result. */
 const CAPACITY_VALUE_SCHEMA = {
@@ -358,6 +467,15 @@ export function resolveSeats(
 function defaultDigestPath(): string {
   const home = process.env['DSH_HOME']
   return join(home !== undefined && home !== '' ? home : join(homedir(), '.dsh'), 'memory', 'digest.md')
+}
+
+/**
+ * Where seat trees are created when no root is configured.
+ * @returns the default work root, beside the rest of the DSH state.
+ */
+function defaultWorkRoot(): string {
+  const home = process.env['DSH_HOME']
+  return join(home !== undefined && home !== '' ? home : join(homedir(), '.dsh'), 'swarm-work')
 }
 
 /**
@@ -672,6 +790,11 @@ export function apply(ctx: Context, config: Config = {}): void {
         planMode: args.planMode ?? config.planMode ?? 'council',
         webMaxResults: config.webMaxResults ?? 0,
         seatResearch: config.seatResearch !== false,
+        // A seat with no filesystem asks for a path and is handed the text.
+        // The roots are the whole of the permission: no root configured, and
+        // no seat is even told it may ask.
+        files: diskSeam(),
+        fileRoots: parseRoots(config.fileRoots),
         planOnly,
         budget: {
           minBalanceUsd: config.minBalanceUsd ?? 0.5,
@@ -784,4 +907,348 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
     },
   }))
+
+  // -- swarm: run a request across the seats, without a council first --
+  //
+  // Same two-factor gate as the council, on its own settings slots: pressing
+  // Approve on a council plan must not authorise a graph of workers. The graph
+  // is decomposed and priced before the gate and stored verbatim, so approving
+  // runs the graph the user actually read.
+  ctx.tools.register(defineTool({
+    name: 'swarm',
+    description:
+      'Split a request into units of work and run them across the configured seats, in dependency waves. '
+      + 'Decomposes and prices the work, then STOPS for approval; it never runs units on its first call. '
+      + 'Use when the user knows what they want done and wants it divided rather than debated.',
+    parameters: {
+      query: { type: 'string', required: true, description: 'The work to split, in the user own terms.' },
+      sequential: { type: 'boolean', description: 'Run units one at a time instead of a wave at a time.' },
+    },
+    output: {
+      schema: SWARM_VALUE_SCHEMA,
+      render: (_args: unknown, value: InferValue<typeof SWARM_VALUE_SCHEMA>) => {
+        // Same marker mechanism as the council: a tool result node carries no
+        // structured payload, so the id the Approve control binds to travels
+        // inside the text and the view strips it.
+        const marker = value.planId === undefined || value.planId === ''
+          ? ''
+          : `${String.fromCharCode(10)}${String.fromCharCode(10)}<!--swarm-plan:${value.planId}-->`
+        return [{ type: 'text' as const, text: `${value.report}${marker}` }]
+      },
+    },
+    async execute(args, exec) {
+      const apiKey = resolveOpenRouterKey({ variable: config.apiKeyEnv })
+      const settingsNow = live()
+      const approval = judgeApproval({
+        pendingPlan: settingsNow.pendingSwarmId === undefined || settingsNow.pendingSwarmId === '' ? undefined : {
+          id: settingsNow.pendingSwarmId,
+          query: settingsNow.pendingSwarmQuery ?? '',
+          issuedAt: settingsNow.pendingSwarmIssuedAt ?? 0,
+        },
+        approvedPlanId: settingsNow.approvedSwarmId,
+        approvedAt: settingsNow.approvedSwarmAt,
+        lastUserTurnAt,
+      })
+      const autoApproved = settingsNow.autoApprove === true
+
+      // A graph is already held and unapproved: show it again rather than
+      // decomposing a second time. Re-planning here would spend another call
+      // and reset the gate, so the run could never reach execution however
+      // many times the model called back.
+      const heldId = settingsNow.pendingSwarmId
+      const heldUnapproved = heldId !== undefined && heldId !== ''
+        && settingsNow.approvedSwarmId !== heldId
+        && !autoApproved
+        && !planExpired(
+          { id: heldId, query: settingsNow.pendingSwarmQuery ?? '', issuedAt: settingsNow.pendingSwarmIssuedAt ?? 0 },
+          Date.now(),
+        )
+      if (heldUnapproved) {
+        return {
+          query: settingsNow.pendingSwarmQuery ?? args.query,
+          phase: 'plan',
+          units: 0,
+          ran: 0,
+          failures: [],
+          planId: heldId,
+          report: [
+            '## Swarm - plan already waiting',
+            '',
+            '> **!** A graph is already held at the approval gate. Nothing new was run and nothing was spent.',
+            '',
+            `**Request:** ${settingsNow.pendingSwarmQuery ?? '(unknown)'}`,
+            '',
+            '_Press **Approve** below, then send any message. Calling the swarm again only re-plans; it cannot approve._',
+          ].join(String.fromCharCode(10)),
+        }
+      }
+
+      const approved = autoApproved || approval.allowed
+      // An approved run uses the stored graph, never a fresh decomposition:
+      // the approval was given for what the user read, not for whatever a
+      // second planning call would return.
+      const storedTasks = approved ? readStoredTasks(settingsNow.pendingSwarmTasks) : undefined
+      const pricing = await fetchModelPricing(exec.signal)
+      const result = await runSwarm({
+        // Once approved, run the request the graph was written for. The turn
+        // that satisfies the verbal factor is usually just "go".
+        query: approved && settingsNow.pendingSwarmQuery !== undefined && settingsNow.pendingSwarmQuery !== ''
+          ? settingsNow.pendingSwarmQuery
+          : args.query,
+        seats: currentSeats(),
+        overrides: config.swarmRoster ?? {},
+        approved,
+        apiKey,
+        pricing,
+        timeoutMs,
+        signal: exec.signal,
+        sequential: args.sequential ?? config.sequential,
+        memory: resolveMemory(live().memoryDigest),
+        webMaxResults: config.webMaxResults ?? 0,
+        files: diskSeam(),
+        fileRoots: parseRoots(config.fileRoots),
+        ...(config.plannerSeat === undefined ? {} : { planner: config.plannerSeat }),
+        ...(storedTasks === undefined ? {} : { tasks: storedTasks }),
+      })
+
+      // Issue the graph for approval, or retire the approval just spent. Both
+      // write settings, the one channel the model cannot reach.
+      let issuedPlanId: string | undefined
+      let issueProblem: string | undefined
+      if (result.phase === 'plan' && !autoApproved) {
+        const issuedId = randomUUID()
+        issuedPlanId = issuedId
+        if (ctx.settings === undefined) {
+          issueProblem = 'the settings service is unavailable, so no Approve control can be shown'
+        } else {
+          try {
+            await ctx.settings.update(COUNCIL_NAMESPACE, {
+              pendingSwarmId: issuedId,
+              pendingSwarmQuery: result.query,
+              pendingSwarmTasks: JSON.stringify(result.tasks),
+              pendingSwarmIssuedAt: Date.now(),
+              // A newly issued graph voids any earlier approval outright.
+              approvedSwarmId: '',
+              approvedSwarmAt: 0,
+            } as never)
+            const check = live().pendingSwarmId
+            if (check !== issuedId) {
+              issueProblem = `the graph was written but did not take effect (settings hold ${check ?? 'nothing'})`
+            }
+          } catch (error) {
+            issueProblem = `the graph could not be recorded: ${describeError(error)}`
+          }
+        }
+      } else if (result.phase === 'full') {
+        // Retire with empty sentinels, not `undefined`: a settings update
+        // treats undefined as "leave unchanged", so a spent approval would
+        // survive and the next run would need no approval at all.
+        await ctx.settings?.update(COUNCIL_NAMESPACE, {
+          pendingSwarmId: '',
+          pendingSwarmQuery: '',
+          pendingSwarmTasks: '',
+          pendingSwarmIssuedAt: 0,
+          approvedSwarmId: '',
+          approvedSwarmAt: 0,
+        } as never)
+      }
+
+      const report = issueProblem === undefined
+        ? result.report
+        : `${result.report}${String.fromCharCode(10)}${String.fromCharCode(10)}> **!** ${issueProblem}`
+      process.stdout.write(`${report}${String.fromCharCode(10)}`)
+
+      return {
+        query: result.query,
+        phase: result.phase,
+        report,
+        units: result.tasks.length,
+        ran: result.results.filter(unit => unit.error === undefined).length,
+        failures: result.results
+          .filter(unit => unit.error !== undefined)
+          .map(unit => `${unit.seat} ${unit.task.id}: ${String(unit.error)}`),
+        ...(issuedPlanId === undefined ? {} : { planId: issuedPlanId }),
+      }
+    },
+  }))
+
+  // -- propose: every seat writes the change, then the council picks one --
+  //
+  // Its own gate again. This is the most expensive of the three tools — a long
+  // writing call per seat, then a vote per seat — and it is the only one whose
+  // output is code, so approving a council debate or a swarm graph must not
+  // authorise it.
+  ctx.tools.register(defineTool({
+    name: 'propose',
+    description:
+      'Have every configured seat independently write its own version of the same code change, each into its own '
+      + 'working tree, then hold a council vote on which version should be implemented. Nothing is written to the '
+      + 'real repositories. STOPS for approval; it never writes on its first call.',
+    parameters: {
+      task: { type: 'string', required: true, description: 'The change to implement, in the user own terms.' },
+      sequential: { type: 'boolean', description: 'Ask seats one at a time instead of together.' },
+    },
+    output: {
+      schema: PROPOSE_VALUE_SCHEMA,
+      render: (_args: unknown, value: InferValue<typeof PROPOSE_VALUE_SCHEMA>) => {
+        const marker = value.planId === undefined || value.planId === ''
+          ? ''
+          : `${String.fromCharCode(10)}${String.fromCharCode(10)}<!--propose-plan:${value.planId}-->`
+        return [{ type: 'text' as const, text: `${value.report}${marker}` }]
+      },
+    },
+    async execute(args, exec) {
+      const apiKey = resolveOpenRouterKey({ variable: config.apiKeyEnv })
+      const settingsNow = live()
+      const approval = judgeApproval({
+        pendingPlan: settingsNow.pendingProposeId === undefined || settingsNow.pendingProposeId === '' ? undefined : {
+          id: settingsNow.pendingProposeId,
+          query: settingsNow.pendingProposeTask ?? '',
+          issuedAt: settingsNow.pendingProposeIssuedAt ?? 0,
+        },
+        approvedPlanId: settingsNow.approvedProposeId,
+        approvedAt: settingsNow.approvedProposeAt,
+        lastUserTurnAt,
+      })
+      const autoApproved = settingsNow.autoApprove === true
+
+      // A round already held and unapproved is shown again rather than
+      // re-issued, so calling back cannot reset the gate indefinitely.
+      const heldId = settingsNow.pendingProposeId
+      const heldUnapproved = heldId !== undefined && heldId !== ''
+        && settingsNow.approvedProposeId !== heldId
+        && !autoApproved
+        && !planExpired(
+          { id: heldId, query: settingsNow.pendingProposeTask ?? '', issuedAt: settingsNow.pendingProposeIssuedAt ?? 0 },
+          Date.now(),
+        )
+      if (heldUnapproved) {
+        return {
+          task: settingsNow.pendingProposeTask ?? args.task,
+          phase: 'plan',
+          candidates: 0,
+          planId: heldId,
+          report: [
+            '## Proposing round - already waiting',
+            '',
+            '> **!** A round is already held at the approval gate. Nothing was run and nothing was spent.',
+            '',
+            `**Change:** ${settingsNow.pendingProposeTask ?? '(unknown)'}`,
+            '',
+            '_Press **Approve** below, then send any message._',
+          ].join(String.fromCharCode(10)),
+        }
+      }
+
+      const approved = autoApproved || approval.allowed
+      const result = await runPropose({
+        // Once approved, write the change the round was issued for.
+        task: approved && settingsNow.pendingProposeTask !== undefined && settingsNow.pendingProposeTask !== ''
+          ? settingsNow.pendingProposeTask
+          : args.task,
+        seats: currentSeats(),
+        fileRoots: parseRoots(config.fileRoots),
+        workRoot: config.workRoot === undefined || config.workRoot === '' ? defaultWorkRoot() : config.workRoot,
+        approved,
+        files: diskSeam(),
+        writes: diskWriteSeam(),
+        apiKey,
+        signal: exec.signal,
+        timeoutMs,
+        sequential: args.sequential ?? config.sequential,
+        memory: resolveMemory(live().memoryDigest),
+        webMaxResults: config.webMaxResults ?? 0,
+        // An approved run writes where the plan said it would, so the report
+        // the user read names the directories the files actually land in.
+        ...(approved && settingsNow.pendingProposeRunId !== undefined && settingsNow.pendingProposeRunId !== ''
+          ? { runId: settingsNow.pendingProposeRunId }
+          : {}),
+      })
+
+      let issuedPlanId: string | undefined
+      let issueProblem: string | undefined
+      if (result.phase === 'plan' && !autoApproved) {
+        const issuedId = randomUUID()
+        issuedPlanId = issuedId
+        if (ctx.settings === undefined) {
+          issueProblem = 'the settings service is unavailable, so no Approve control can be shown'
+        } else {
+          try {
+            await ctx.settings.update(COUNCIL_NAMESPACE, {
+              pendingProposeId: issuedId,
+              pendingProposeTask: result.task,
+              pendingProposeRunId: result.runId,
+              pendingProposeIssuedAt: Date.now(),
+              approvedProposeId: '',
+              approvedProposeAt: 0,
+            } as never)
+            const check = live().pendingProposeId
+            if (check !== issuedId) {
+              issueProblem = `the round was written but did not take effect (settings hold ${check ?? 'nothing'})`
+            }
+          } catch (error) {
+            issueProblem = error instanceof Error ? error.message : String(error)
+          }
+        }
+      } else if (approval.allowed && !autoApproved && ctx.settings !== undefined) {
+        // Retire the approval just spent, so it cannot authorise a second run.
+        try {
+          await ctx.settings.update(COUNCIL_NAMESPACE, {
+            pendingProposeId: '',
+            pendingProposeTask: '',
+            pendingProposeRunId: '',
+            pendingProposeIssuedAt: 0,
+            approvedProposeId: '',
+            approvedProposeAt: 0,
+          } as never)
+        } catch {
+          // A retirement that fails leaves a spent approval in place. The gate
+          // still requires a later user turn, so it cannot fire unattended.
+        }
+      }
+
+      const report = issueProblem === undefined
+        ? result.report
+        : `${result.report}${String.fromCharCode(10)}${String.fromCharCode(10)}> **!** ${issueProblem}`
+      process.stdout.write(`${report}${String.fromCharCode(10)}`)
+
+      return {
+        task: result.task,
+        phase: result.phase,
+        report,
+        candidates: result.candidates.length,
+        ...(result.selection?.winner === undefined ? {} : { winner: result.selection.winner }),
+        ...(issuedPlanId === undefined ? {} : { planId: issuedPlanId }),
+      }
+    },
+  }))
+}
+
+/**
+ * Read a stored task graph back, treating anything unreadable as absent.
+ *
+ * The graph crosses a durable file boundary, so it is parsed rather than
+ * trusted. An unreadable graph means the run decomposes again and stops at the
+ * gate for the user to re-approve, which is the safe direction: the
+ * alternative is running a half-parsed graph nobody approved.
+ * @param raw - the stored JSON, when there is any.
+ * @returns the graph, or undefined when there is none to run.
+ */
+function readStoredTasks(raw: string | undefined): readonly SubTask[] | undefined {
+  if (raw === undefined || raw === '') return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    // Malformed stored JSON. The only writer is the issue path above, so a bad
+    // value means the settings file was edited or truncated outside the harness.
+    return undefined
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return undefined
+  const tasks = parsed.filter((entry): entry is SubTask =>
+    typeof entry === 'object' && entry !== null
+    && typeof (entry as { id?: unknown }).id === 'string'
+    && typeof (entry as { title?: unknown }).title === 'string'
+    && Array.isArray((entry as { dependsOn?: unknown }).dependsOn))
+  return tasks.length === parsed.length ? tasks : undefined
 }

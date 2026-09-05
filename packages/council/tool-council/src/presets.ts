@@ -31,8 +31,16 @@ export type PresetMap = Readonly<Record<string, PresetEntry>>
 /** `area/name`, both lowercase kebab. Anything else sorts and reads badly. */
 export const PRESET_ID = /^[a-z0-9][a-z0-9-]{0,31}\/[a-z0-9][a-z0-9-]{0,47}$/
 
-/** The longest request a preset may carry; past this it belongs in a file. */
-export const MAX_QUERY = 4_000
+/**
+ * The longest request a preset may carry; past this it belongs in a file.
+ *
+ * Raised from 32k after a real prompt came in at 38k: the whole point of a
+ * saved run is that the request is already written out, so a ceiling that a
+ * genuine one overshoots turns every long prompt into a negotiation. 64k still
+ * sits far below anything that would bloat settings.yaml, and a request past
+ * it is long enough that a file reference reads better than an inlined wall.
+ */
+export const MAX_QUERY = 64_000
 
 /**
  * Why this id is not usable, or undefined when it is.

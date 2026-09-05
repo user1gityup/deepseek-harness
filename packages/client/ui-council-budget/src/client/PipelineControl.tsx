@@ -10,6 +10,13 @@
  * control before it is sent, because a button that silently prompts on the
  * user's behalf is a button they cannot audit.
  *
+ * A saved run is PICKED, not fired, by being clicked. With several of them
+ * the question the panel has to answer before anything is spent is which one,
+ * so the pills carry that answer: the picked run reads green and the rest read
+ * red, saying plainly which one the Run button is aimed at. Nothing is red
+ * until something is picked — a row of red pills before any choice is made
+ * would be reporting a fault, not a choice.
+ *
  * The held state is the reason this is a panel rather than a single button.
  * A run parked on a spent subscription has to come back by itself — that is
  * the whole point of holding rather than failing — so the control counts the
@@ -84,6 +91,20 @@ export function presetLeaf(id: string): string {
   return cut < 0 ? id : id.slice(cut + 1)
 }
 /**
+ * How one saved run's pill should read, given which run is picked.
+ *
+ * Three states rather than two: with nothing picked the row is a list and
+ * every pill is neutral, and only a choice turns the others red.
+ * @param id - the pill's preset id.
+ * @param picked - the picked preset id, '' when none is.
+ * @returns 'on' for the picked run, 'off' for the rest, 'idle' before a choice.
+ */
+export function presetTone(id: string, picked: string): 'on' | 'off' | 'idle' {
+  if (picked === '') return 'idle'
+  return id === picked ? 'on' : 'off'
+}
+
+/**
  * How long until a hold ends, worded for a person.
  * @param resumeAt - epoch ms.
  * @param now - epoch ms.
@@ -108,6 +129,10 @@ export function PipelineControl({ t, settings, send }: PipelineControlProps): JS
   )
   const section = snapshot.value
   const [request, setRequest] = useState('')
+  // Which saved run the Run button is aimed at; '' means the typed request.
+  // Picking is separate from running because a pill that spends on the click
+  // that selects it can never be *selected* — only committed to.
+  const [picked, setPicked] = useState('')
   const [now, setNow] = useState(() => Date.now())
   const [busy, setBusy] = useState(false)
   // A hold must reactivate ONCE. Without this the countdown reaching zero
@@ -142,9 +167,29 @@ export function PipelineControl({ t, settings, send }: PipelineControlProps): JS
     return () => { clearInterval(timer) }
   }, [held])
 
+  // The picked run, read from the live list rather than copied: a preset
+  // deleted or rewritten under the panel must not still be firable from a
+  // selection made before the change.
+  const chosen = presets.find(([id]) => id === picked)?.[1]
+  // The one text the Run button will send. A picked run outranks the box, and
+  // the two clear each other, so the panel never holds two pending requests.
+  const outgoing = chosen === undefined ? request.trim() : (chosen.query ?? '')
+
   const go = (text: string): void => {
     setBusy(true)
     void send(text).finally(() => { setBusy(false) })
+  }
+
+  // Start whatever the panel is aimed at. Only a saved run carries an
+  // auto-advance setting, so firing one writes that flag and a typed request
+  // clears it — otherwise the last preset's setting would leak into the next
+  // hand-typed run.
+  const start = (): void => {
+    if (outgoing === '') return
+    void settings.set('pipelineAuto', chosen?.autoAdvance === true)
+    advanced.current = ''
+    setPicked('')
+    go(startPrompt(outgoing))
   }
 
   // The reactivation itself: the window has rolled over, so continue without
@@ -173,6 +218,12 @@ export function PipelineControl({ t, settings, send }: PipelineControlProps): JS
   useEffect(() => {
     if (!running && auto) void settings.set('pipelineAuto', false)
   }, [running, auto, settings])
+
+  // A pick that no longer names a saved run would colour the row while aiming
+  // the Run button at nothing, so it is dropped.
+  useEffect(() => {
+    if (picked !== '' && chosen === undefined) setPicked('')
+  }, [picked, chosen])
 
   const index = STAGES.indexOf(stage as (typeof STAGES)[number])
   const position = index < 0 ? 1 : index + 1
@@ -238,23 +289,30 @@ export function PipelineControl({ t, settings, send }: PipelineControlProps): JS
         ? (
           <div className={css.row}>
             <span className={css.presetLabel}>{t('pipeline.presets')}</span>
-            {presets.map(([id, preset]) => (
-              <button
-                key={id}
-                type="button"
-                className={css.preset}
-                disabled={busy}
-                title={preset.query}
-                onClick={() => {
-                  void settings.set('pipelineAuto', preset.autoAdvance === true)
-                  advanced.current = ''
-                  go(startPrompt(preset.query ?? ''))
-                }}
-              >
-                {presetArea(id) === '' ? null : <span className={css.presetArea}>{presetArea(id)}</span>}
-                {preset.name === undefined || preset.name === '' ? presetLeaf(id) : preset.name}
-              </button>
-            ))}
+            {presets.map(([id, preset]) => {
+              const tone = presetTone(id, picked)
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  className={
+                    tone === 'idle' ? css.preset : `${css.preset} ${tone === 'on' ? css.presetOn : css.presetOff}`
+                  }
+                  aria-pressed={tone === 'on'}
+                  disabled={busy}
+                  title={preset.query}
+                  onClick={() => {
+                    // Clicking the picked run again unpicks it, so a choice
+                    // made by mistake is undone the same way it was made.
+                    setPicked(tone === 'on' ? '' : id)
+                    if (tone !== 'on') setRequest('')
+                  }}
+                >
+                  {presetArea(id) === '' ? null : <span className={css.presetArea}>{presetArea(id)}</span>}
+                  {preset.name === undefined || preset.name === '' ? presetLeaf(id) : preset.name}
+                </button>
+              )
+            })}
           </div>
         )
         : null}
@@ -267,16 +325,19 @@ export function PipelineControl({ t, settings, send }: PipelineControlProps): JS
               type="text"
               value={request}
               placeholder={t('pipeline.placeholder')}
-              onChange={(event) => { setRequest(event.target.value) }}
+              onChange={(event) => {
+                setRequest(event.target.value)
+                if (event.target.value !== '') setPicked('')
+              }}
               onKeyDown={(event) => {
-                if (event.key === 'Enter' && request.trim() !== '') go(startPrompt(request.trim()))
+                if (event.key === 'Enter') start()
               }}
             />
             <button
               type="button"
               className={css.action}
-              disabled={busy || request.trim() === ''}
-              onClick={() => { go(startPrompt(request.trim())) }}
+              disabled={busy || outgoing === ''}
+              onClick={() => { start() }}
             >
               {t('pipeline.run')}
             </button>
@@ -286,8 +347,8 @@ export function PipelineControl({ t, settings, send }: PipelineControlProps): JS
 
       {/* The prompt is shown, not hidden: a button that speaks for the user
           should say what it is about to say. */}
-      {!running && request.trim() !== ''
-        ? <p className={css.preview}>{startPrompt(request.trim())}</p>
+      {!running && outgoing !== ''
+        ? <p className={css.preview}>{startPrompt(outgoing)}</p>
         : null}
     </div>
   )

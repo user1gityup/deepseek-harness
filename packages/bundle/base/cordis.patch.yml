@@ -542,3 +542,12 @@
     # choice.
     - id: llm-deepseek
       name: '@deepseek-ai/dsh-llm-deepseek'
+
+    # The Claude Code CLI adapter. Its transport is a child process, not an
+    # endpoint, so it carries no key: a request is authenticated by whatever
+    # the installed `claude` binary is already signed in as. Mounted here so
+    # the route exists in the model picker; nothing routes to it until
+    # `agent-default-model` or a per-session choice selects it. Text only —
+    # print mode cannot accept the harness tool set.
+    - id: llm-claude-cli
+      name: '@deepseek-ai/dsh-llm-claude-cli'

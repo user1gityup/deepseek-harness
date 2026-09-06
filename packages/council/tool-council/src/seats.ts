@@ -10,7 +10,7 @@
 
 import { spawn } from 'node:child_process'
 import { describeError } from './errors.ts'
-import { statSync } from 'node:fs'
+import { mkdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { SeatId } from './colors.ts'
@@ -63,6 +63,19 @@ export interface SeatConfig {
    * cheaper than pasting the digest into every prompt.
    */
   readonly contextFileFlag?: string | undefined
+  /**
+   * For `cli`: working directory for the child, overriding the host's own.
+   *
+   * An agent CLI discovers project instruction files by walking up from its
+   * working directory. Inheriting the host's cwd therefore feeds the seat
+   * whatever repository DSH happens to be running in — measured at ~8s per
+   * call for `claude -p`, and it changes the answer: a seat handed a project's
+   * instructions will sometimes address those instead of the question. Seats
+   * do not read files themselves anyway (the host reads them and quotes the
+   * text back, resolved against the configured roots), so a neutral directory
+   * costs the seat nothing.
+   */
+  readonly cwd?: string | undefined
   /** Whether this seat participates. */
   readonly enabled: boolean
 }
@@ -113,6 +126,7 @@ export const DEFAULT_SEATS: readonly SeatConfig[] = [
     // not write to the workspace.
     args: ['--allowedTools', 'WebSearch,WebFetch,Read,Glob,Grep', '-p', '{prompt}'],
     contextFileFlag: '--append-system-prompt-file',
+    cwd: join(homedir(), '.dsh', 'seat-cwd'),
     enabled: true,
   },
   {
@@ -148,6 +162,7 @@ export const DEFAULT_SEATS: readonly SeatConfig[] = [
     // and the run's 180s default killed it mid-retry. This buys it the room to
     // fall through to another provider rather than fail the round.
     timeoutMs: 420_000,
+    cwd: join(homedir(), '.dsh', 'seat-cwd'),
     enabled: false,
   },
   {
@@ -218,7 +233,14 @@ const WINDOWS_EXTENSIONS = ['.exe', '.com', '.cmd', '.bat', ''] as const
  */
 const NPM_BIN_PATHS: Readonly<Record<string, readonly string[]>> = {
   claude: ['@anthropic-ai/claude-code/bin/claude.exe'],
-  codex: ['@openai/codex/bin/codex.exe'],
+  // Codex moved its native binary into a per-platform sub-package; `bin/` now
+  // holds only a JS wrapper. The old path stays last so an older install still
+  // resolves.
+  codex: [
+    '@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe',
+    '@openai/codex/node_modules/@openai/codex-win32-arm64/vendor/aarch64-pc-windows-msvc/bin/codex.exe',
+    '@openai/codex/bin/codex.exe',
+  ],
 }
 
 /** Directories npm uses for global packages on this platform. */
@@ -275,6 +297,22 @@ export function executableCandidates(command: string): readonly string[] {
   return real === undefined ? spellings : [real, ...spellings]
 }
 
+/**
+ * Make sure a seat's working directory exists.
+ * @param dir - the configured directory.
+ * @returns the same directory, or the host's cwd when it cannot be created.
+ */
+function ensureDir(dir: string): string {
+  try {
+    mkdirSync(dir, { recursive: true })
+    return dir
+  } catch {
+    // Falling back to the host's cwd loses the isolation but still runs, which
+    // is the right trade for a seat that would otherwise fail outright.
+    return process.cwd()
+  }
+}
+
 /** Result of one child-process run. */
 interface RunResult {
   readonly stdout: string
@@ -297,6 +335,7 @@ function runOnce(
   signal: AbortSignal | undefined,
   timeoutMs: number,
   env: Readonly<Record<string, string>> | undefined,
+  cwd: string | undefined,
 ): Promise<RunResult> {
   return new Promise<RunResult>((resolve) => {
     // `shell: false` is the security boundary: the prompt is argv data, never
@@ -309,6 +348,18 @@ function runOnce(
       child = spawn(command, [...args], {
         shell: false,
         windowsHide: true,
+        // The child gets NO stdin. Node's default is an open pipe nobody ever
+        // writes to, and an agent CLI that accepts a piped prompt reads it:
+        // `codex exec` prints "Reading additional input from stdin..." and
+        // blocks forever, so the seat produced no output and died at the
+        // timeout with the run looking merely slow. Closing stdin turns that
+        // into the EOF the CLI is waiting for. `claude -p` never waited on
+        // stdin, which is why only one seat ever showed the symptom.
+        stdio: ['ignore', 'pipe', 'pipe'],
+        // Only when the seat asked for one; otherwise inherit the host's cwd.
+        // Created on demand: spawn throws ENOENT for a missing cwd, and a seat
+        // must not depend on a directory someone remembered to make.
+        ...cwd === undefined ? {} : { cwd: ensureDir(cwd) },
         // Layered over the parent environment rather than replacing it: the
         // child still needs PATH and the rest of it to start at all.
         ...env === undefined ? {} : { env: { ...process.env, ...env } },
@@ -377,7 +428,7 @@ export async function askCliSeat(
     : base
   let lastError = 'not found'
   for (const candidate of executableCandidates(command)) {
-    const result = await runOnce(candidate, args, signal, timeoutMs, seat.env)
+    const result = await runOnce(candidate, args, signal, timeoutMs, seat.env, seat.cwd)
     // ENOENT means this spelling does not exist; try the next candidate.
     // EINVAL is Node refusing to spawn a batch shim without a shell; treat it
     // as "wrong spelling" so the next candidate gets a turn.

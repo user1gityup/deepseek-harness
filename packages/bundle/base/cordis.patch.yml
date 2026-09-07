@@ -232,6 +232,8 @@
     # Publishes the Claude Code subscription quota for the browser panel.
     # Boot only reads the status line's cache file; a live `/usage` call
     # costs a request against the quota, so it waits for a button press.
+    - id: quota-codex
+      name: '@deepseek-ai/dsh-quota-codex'
     - id: quota-claude
       name: '@deepseek-ai/dsh-quota-claude'
 
@@ -494,14 +496,22 @@
       disabled: true
 
 
-    # Search through the Claude Code CLI, billed to the subscription that is
-    # already paid for rather than a metered key. Listed last so the seam can
-    # fall back to it when the metered providers are unavailable.
+    # Search through the agent CLIs, billed to subscriptions that are already
+    # paid for rather than a metered key. Listed last so the seam can fall back
+    # to it when the metered providers are unavailable.
+    #
+    # Two CLI lanes, not one. A council research round asks for up to eight
+    # lookups; sent down a single binary they run one after another and the
+    # round waits minutes for them. `balanced` sends each search to whichever
+    # lane is least busy, so concurrent lookups finish in parallel. Cost class
+    # still leads: both CLI lanes are subscription-included, and OpenRouter is
+    # only reached when neither answers.
     - id: web-search-cli
       name: '@deepseek-ai/dsh-web-search-cli'
       config:
         id: router
         command: claude
+        trafficPolicy: balanced
         routeToOpenRouter: true
 
     - id: tool-web

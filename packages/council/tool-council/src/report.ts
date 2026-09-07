@@ -131,6 +131,13 @@ export function renderReport(result: CouncilResult, palette: Palette): string {
     out.push(result.budget.allowed && !result.budget.overPace ? palette.muted(line) : palette.failure(line))
   }
   if (result.spentUsd !== undefined) {
+    const amendedRun = result.amended
+    if (amendedRun !== undefined) {
+      out.push(`amended: attempt ${String(amendedRun.attempt)} on run ${amendedRun.runId}; recovered ${String(amendedRun.recoveredDrafts.length)} answer(s), ${String(amendedRun.recoveredReviews.length)} review(s)`)
+      if (amendedRun.staleReviews.length > 0) {
+        out.push(`  ! ${String(amendedRun.staleReviews.length)} vote(s) predate the recovered answers and were kept, not re-asked`)
+      }
+    }
     out.push(palette.muted(`Spent this run: $${result.spentUsd.toFixed(4)}`))
   }
   out.push('')

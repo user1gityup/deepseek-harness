@@ -6,6 +6,7 @@
  * `.agents/notes/implemented/process/2026-07-02-tool-schema-catalog.md`.
  */
 
+import { randomUUID } from 'node:crypto'
 import { globSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
@@ -70,6 +71,19 @@ import VmWorkflowEngine from '@deepseek-ai/dsh-workflow-worker-thread'
 import * as ToolRalph from '@deepseek-ai/dsh-tool-ralph'
 import * as ToolWorkflow from '@deepseek-ai/dsh-tool-workflow'
 import { githubSlug } from './verify-md-links.ts'
+
+/**
+ * A throwaway settings document for one harvest.
+ *
+ * Unique per call, not a fixed name under `tmpdir()`. The catalog is collected
+ * by more than one spec, and the suite runs them in parallel: a shared path has
+ * two providers opening, rewriting and deleting the same file, which fails only
+ * under a full run and passes every time the spec is run alone.
+ * @returns an absolute path nothing else will use.
+ */
+function catalogSettingsPath(): string {
+  return join(tmpdir(), `dsh-tool-catalog-${String(process.pid)}-${randomUUID()}.yaml`)
+}
 
 /** Attachment seam marker that makes the attachments-conditional `read_image` schema harvestable. */
 class CatalogAttachmentStore extends AttachmentStore {
@@ -627,7 +641,7 @@ const TOOL_PACKAGES: ToolPackage[] = [
       // `~/.dsh/settings.yaml` must not be touched by a docs generator, which
       // is why the path is passed explicitly rather than defaulted.
       await ctx.plugin(AgentRegistry)
-      await ctx.plugin(FileSettingsProvider, { path: join(tmpdir(), 'dsh-tool-catalog-settings.yaml') })
+      await ctx.plugin(FileSettingsProvider, { path: catalogSettingsPath() })
       await ctx.plugin(WebRuntime)
       await ctx.plugin(ToolCouncil)
     },

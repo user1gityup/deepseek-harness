@@ -21,9 +21,37 @@ interface JsonSchema {
   required?: string[]
 }
 
+/**
+ * The catalog, collected once for every assertion that only reads it.
+ *
+ * A collection boots the whole shipped tool graph — every package on a fresh
+ * Context, disposed after harvest — and the file used to pay for that five
+ * times over for five reads of the same result. That was already the slowest
+ * spec here and it grew with each package added to the manifest, until under a
+ * loaded full-suite run it blew the 5s default and failed on timing alone.
+ *
+ * The one test that manipulates `process.env.PATH` still collects its own, so
+ * this cache can never hand it a catalog built under the real PATH.
+ */
+let shared: Promise<ToolCatalog> | undefined
+function sharedCatalog(): Promise<ToolCatalog> {
+  shared ??= collectToolCatalog()
+  return shared
+}
+
+/**
+ * How long a test that boots the whole tool graph may take.
+ *
+ * Not a unit test's budget: one collection mounts every shipped package on its
+ * own Context and disposes it again, and the suite runs this file beside every
+ * other. The 5s default passed only while the manifest was smaller and the
+ * machine was idle.
+ */
+const COLLECT_TIMEOUT_MS = 120_000
+
 describe('gen-tool-catalog collectToolCatalog', () => {
   it('boots every shipped tool package and harvests its model-facing schemas', async () => {
-    const catalog = await collectToolCatalog()
+    const catalog = await sharedCatalog()
     const names = catalog.flatMap(entry => entry.schemas.map(s => s.name)).sort()
     expect(names).toEqual([
       'ask_user_question', 'bash', 'bash', 'cordis_define', 'cordis_inspect_list', 'cordis_inspect_query',
@@ -45,10 +73,10 @@ describe('gen-tool-catalog collectToolCatalog', () => {
         expect((schema.parameters as unknown as JsonSchema).type).toBe('object')
       }
     }
-  })
+  }, COLLECT_TIMEOUT_MS)
 
   it('resolves a runtime-spread enum to its literal members (the payoff over AST)', async () => {
-    const catalog = await collectToolCatalog()
+    const catalog = await sharedCatalog()
     const todo = catalog
       .flatMap(entry => entry.schemas)
       .find(s => s.name === 'todo_write')
@@ -56,10 +84,10 @@ describe('gen-tool-catalog collectToolCatalog', () => {
     // spread, not the values. Booting yields the shipped enum literals.
     const status = (((todo?.parameters as unknown as JsonSchema).properties?.todos)?.items)?.properties?.status
     expect(status?.enum).toEqual(['pending', 'in_progress', 'completed'])
-  })
+  }, COLLECT_TIMEOUT_MS)
 
   it('attributes each harvested tool with its registering plugin source', async () => {
-    const catalog = await collectToolCatalog()
+    const catalog = await sharedCatalog()
     const bash = catalog.find(entry => entry.pkg === '@deepseek-ai/dsh-tool-bash')
     expect(bash?.sources.bash).toBe('packages/shell/tool-bash/src/index.ts')
     const control = catalog.find(entry => entry.pkg === '@deepseek-ai/dsh-tool-subagent-control')
@@ -68,7 +96,7 @@ describe('gen-tool-catalog collectToolCatalog', () => {
       list_agents: 'packages/subagent/tool-subagent-control/src/list-agents.ts',
       send_message: 'packages/subagent/tool-subagent-control/src/index.ts',
     })
-  })
+  }, COLLECT_TIMEOUT_MS)
 
   it('harvests search tools without depending on the generator process PATH', async () => {
     const oldPath = process.env.PATH
@@ -81,16 +109,16 @@ describe('gen-tool-catalog collectToolCatalog', () => {
       if (oldPath === undefined) delete process.env.PATH
       else process.env.PATH = oldPath
     }
-  })
+  }, COLLECT_TIMEOUT_MS)
 
   it('records the shipped `subagent_fork` alias in a note (config-driven tool name)', async () => {
     // `tool-subagent`'s registered name is the load-time `toolName` config, so the shipped
     // agents surface this one package as both `subagent` and `subagent_fork`.
-    const catalog = await collectToolCatalog()
+    const catalog = await sharedCatalog()
     const subagent = catalog.find(entry => entry.pkg === '@deepseek-ai/dsh-tool-subagent')
     expect(subagent?.schemas.map(s => s.name)).toEqual(['subagent'])
     expect(subagent?.note).toMatch(/subagent_fork/)
-  })
+  }, COLLECT_TIMEOUT_MS)
 })
 
 describe('gen-tool-catalog assertManifestComplete', () => {

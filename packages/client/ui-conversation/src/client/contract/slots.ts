@@ -193,6 +193,17 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     // ui-input-trigger, so the type arrives transitively). The runtime declaration
     // (children table in apply.ts) stays here with the other input slots.
     /**
+     * A pinned full-width band at the very top of the conversation column,
+     * between the session header and the scrollport — the seat for a control
+     * that must stay in one place no matter how far the transcript has
+     * scrolled (the pipeline control lives here). It is OUTSIDE the scroll
+     * body by construction, so nothing here moves as messages arrive and the
+     * hero collapses; anything that should travel with the composer belongs
+     * in `conversation.input.dock` instead. No owner share: the band is
+     * chrome, not part of the input, so entries take only what they inject.
+     */
+    'conversation.column.top': { kind: 'list'; scope: 'session' }
+    /**
      * A full-width row of its own, stacked above the composer card — the seat
      * for anything that needs a line to itself (queue rows, a todo strip, a
      * goal bar). Pick this over the three seats below when your content wraps
@@ -641,6 +652,7 @@ export type ConversationSlotProps =
     | 'conversation.session' | 'conversation.session.header'
     | 'conversation.composer' | 'conversation.composer.bar'
     | 'conversation.input.overlay'
+    | 'conversation.column.top'
     | 'conversation.input.dock' | 'conversation.composer.dock'
     | 'conversation.input.left' | 'conversation.input.right'
     | 'conversation.hero.brand.mark'

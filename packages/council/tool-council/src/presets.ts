@@ -23,6 +23,18 @@ export interface PresetEntry {
   readonly query: string
   /** Advance the chain between stages without being asked. */
   readonly autoAdvance?: boolean | undefined
+  /**
+   * The stage order this run needs, comma separated, when it is not the
+   * default `council,swarm,review`.
+   *
+   * A saved run is the only place the order can sensibly live. It is a
+   * property of the KIND of work — deciding something wants three stages,
+   * building something wants the proposing stage in the middle — and the user
+   * chose that when they wrote the run, not when they pressed the button.
+   * Leaving it out of the preset meant a build run had to ask for its own
+   * stages in prose, which the tool never read.
+   */
+  readonly stages?: string | undefined
 }
 
 /** Presets as settings hold them, keyed by `area/name`. */
@@ -119,6 +131,7 @@ export function savePreset(
         name: name === '' ? (id.split('/')[1] ?? id) : name,
         query,
         ...(entry.autoAdvance === undefined ? {} : { autoAdvance: entry.autoAdvance }),
+        ...(entry.stages === undefined || entry.stages.trim() === '' ? {} : { stages: entry.stages.trim() }),
       },
     },
     ...(held === undefined ? {} : { replaced: true }),
@@ -167,7 +180,10 @@ export function renderPresets(presets: PresetMap): string {
       lines.push(`**${area}**`)
     }
     const auto = entry.autoAdvance === true ? ' · advances itself' : ''
-    lines.push(`- \`${id}\` — ${entry.name}${auto}`)
+    // The order is worth showing: two runs with the same name and different
+    // stage lists cost very different amounts, and the button hides that.
+    const order = entry.stages === undefined || entry.stages === '' ? '' : ` · ${entry.stages}`
+    lines.push(`- \`${id}\` — ${entry.name}${order}${auto}`)
   }
   return lines.join('\n')
 }

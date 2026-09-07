@@ -227,6 +227,30 @@
   flex: none;
 }
 
+/* The pinned top band: column chrome, never part of the scrollport, so its
+   occupants hold one position through hero, settling and active alike. Width
+   follows the shared content axis so a pinned card lines up with the composer
+   card below it rather than spanning the raw column. `flex: none` is what
+   keeps the transcript's growth off it; `:empty` keeps an unregistered band
+   from reserving the gap. */
+.columnTop {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 6px;
+  align-self: center;
+  width: min(calc(var(--dsh-composer-card-max-width) + 2 * var(--dsh-composer-side-clearance)), 100%);
+  padding: 8px var(--dsh-composer-side-clearance) 0;
+  box-sizing: border-box;
+  /* Over the transcript's sticky code-block banners (z-index 6) and level
+     with the composer seat, so nothing scrolling past paints on top of it. */
+  z-index: 7;
+}
+
+.columnTop:empty {
+  display: none;
+}
+
 .scrollBody {
   display: flex;
   flex: 1;

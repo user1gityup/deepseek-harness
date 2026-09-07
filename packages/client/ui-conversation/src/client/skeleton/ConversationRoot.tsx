@@ -186,6 +186,12 @@ export function ConversationRoot({
   return (
     <div className={css.root} data-phase={phase}>
       {renderSlot('conversation.session.header', {})}
+      {/* Pinned band. It sits OUTSIDE .scrollBody on purpose: an entry docked
+          above the composer rides the hero to the middle of a blank column and
+          then down to the floor as the transcript grows, which is exactly the
+          movement this band exists to remove. `:empty` collapses it when no
+          plugin has registered, so an unused band costs no strip of column. */}
+      <div className={css.columnTop}>{renderSlot('conversation.column.top', {})}</div>
       <div className={css.scrollBody} data-conversation-scroll="">
         {renderSlot('conversation.session', {})}
         {composerSeat}

@@ -59,6 +59,10 @@ export type BudgetKey =
   | 'pipeline.presets'
   | 'pipeline.restart'
   | 'pipeline.placeholder'
+  | 'pipeline.minimize'
+  | 'pipeline.expand'
+  | 'pipeline.failed'
+  | 'pipeline.idle'
   | 'swarm.meteredWarning'
   | 'approve.always'
   | 'approve.alwaysHint'
@@ -109,14 +113,18 @@ export const en: Record<BudgetKey, string> = {
   'approve.discard': 'Discard',
   'approve.awaitingMessage': 'Approved. Send a message to run the council.',
   'pipeline.title': 'Pipeline',
-  'pipeline.hint': 'Council agrees the approach, the swarm runs it, the council reviews it. One stage per press.',
+  'pipeline.hint': 'Council agrees the approach, seats write competing versions, the swarm builds the one you pick, the council reviews it. One stage per press.',
   'pipeline.run': 'Run pipeline',
   'pipeline.continue': 'Continue',
   'pipeline.held': 'Held on quota — resuming in',
   'pipeline.resumeNow': 'Resume now',
   'pipeline.presets': 'Saved runs',
   'pipeline.restart': 'Start over',
+  'pipeline.failed': 'The prompt did not reach the session — nothing was sent. Reason:',
   'pipeline.placeholder': 'What should the chain work on?',
+  'pipeline.minimize': 'Minimize',
+  'pipeline.expand': 'Expand',
+  'pipeline.idle': 'idle',
   'swarm.toggleTitle': 'Swarm',
   'swarm.toggleLabel': 'Run approved work as a swarm',
   'swarm.toggleOn': 'Approved work is split across your seats and run in waves',
@@ -176,14 +184,18 @@ export const zh: Record<BudgetKey, string> = {
   'approve.discard': '丢弃',
   'approve.awaitingMessage': '已批准。发送一条消息即可运行议会。',
   'pipeline.title': '流水线',
-  'pipeline.hint': '议会定方案，蜂群执行，议会复核。每次按下推进一个阶段。',
+  'pipeline.hint': '议会定方案，各席各写一版，蜂群按你所选者构建，议会复核。每次按下推进一个阶段。',
   'pipeline.run': '运行流水线',
   'pipeline.continue': '继续',
   'pipeline.held': '额度用尽，暂停中，恢复倒计时',
   'pipeline.resumeNow': '立即恢复',
   'pipeline.presets': '已保存的运行',
   'pipeline.restart': '重新开始',
+  'pipeline.failed': '提示未送达会话 — 未发送任何内容。原因：',
   'pipeline.placeholder': '这条链要处理什么？',
+  'pipeline.minimize': '最小化',
+  'pipeline.expand': '展开',
+  'pipeline.idle': '空闲',
   'swarm.toggleTitle': '蜂群',
   'swarm.toggleLabel': '以蜂群方式执行已批准的工作',
   'swarm.toggleOn': '已批准的工作将按波次分配给你配置的席位',

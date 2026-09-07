@@ -37,10 +37,11 @@ This table connects model-visible tool names to the plugin package and service s
 | `@deepseek-ai/dsh-tool-subagent-control` | `interrupt_agent`, `list_agents`, `send_message` | `ctx.tools`, `ctx.subagents`, `ctx.agents and ctx.sessionProjections (list_agents only)` | `tool/call`, `tool/result`, `child session events through ctx.subagents` | - | The globally named control tools over continuable background subagents: provider-bound `tool-subagent` instances register distinct delegation tools, while this package registers `send_message` and `interrupt_agent` once, plus `list_agents` from its separately loaded `/list-agents` plugin (whose catalog rows use the sessionProjections and live Agent registries). |
 | `@deepseek-ai/dsh-tool-subagent-report` | `report` | `ctx.subagents`, `ctx.systemPrompt`, `a live continuable in-process child Agent` | `tool/call`, `tool/result`, `a user-role message in the direct parent session` | - | Registered per continuable in-process child rather than globally, so this schema is visible only inside such a child and survives its global `toolFilter`. The same contribution installs the child-scoped `tool:report` prompt section, which this catalog does not render. The parent-facing `send_message` tool is installed independently. |
 | `@deepseek-ai/dsh-tool-jobs` | `job_kill`, `job_list`, `job_output` | `ctx.tools`, `ctx.jobs`, `ctx.systemPrompt` | `tool/call`, `tool/result`, `user/message via agent.inject() for background completion notices` | - | The kind-agnostic background-job controller: background bash commands, PTY sends, and subagents are read, listed, and killed through the same three tools. Loading the plugin attaches the controller that arms producers' `ctx.jobs.start()`. |
-| `@deepseek-ai/dsh-experimental-tool-agent-team` | `followup_task`, `interrupt_agent`, `list_agents`, `send_message`, `spawn_teammate`, `team_task_create`, `team_task_get`, `team_task_list`, `team_task_update`, `wait_agent` | `ctx.tools`, `ctx.systemPrompt`, `ctx.agentTeams`, `an exact live Team member Agent` | `tool/call`, `team/member`, `team/message/queued`, `team/message/delivered`, `team/task`, `tool/result` | - | All ten tools are scoped to implicit Team Leads and durable teammates. The shipped dsh-base bundle keeps the package disabled; the documented Agent Teams profile patch enables it while disabling the legacy continuable-child control names. |
+| `@deepseek-ai/dsh-experimental-tool-agent-team` | `followup_task`, `interrupt_agent`, `list_agents`, `list_providers`, `send_message`, `spawn_teammate`, `team_task_create`, `team_task_get`, `team_task_list`, `team_task_update`, `wait_agent` | `ctx.tools`, `ctx.systemPrompt`, `ctx.agentTeams`, `ctx.subagents`, `an exact live Team member Agent` | `tool/call`, `team/member`, `team/message/queued`, `team/message/delivered`, `team/task`, `tool/result` | - | All ten tools are scoped to implicit Team Leads and durable teammates. The shipped dsh-base bundle keeps the package disabled; the documented Agent Teams profile patch enables it while disabling the legacy continuable-child control names. |
 | `@deepseek-ai/dsh-tool-todo` | `todo_write` | `ctx.tools`, `owning Agent session` | `tool/call`, `todo/write`, `tool/result` | - | todo_write is session-owned state; UIs render the latest todo/write event as a checklist. `allowParallelInProgress` is required with no default, so the catalog states its choice: `true`, whose description invites several `in_progress` items. A deployment choosing `false` receives the same tool with a description asking for exactly one active task. |
 | `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`, `ctx.workflowEngine`, `ctx.systemPrompt`, `a calling Agent (exec.agent parents the script children)` | `tool/call`, `tool/result` | - | - |
 | `@deepseek-ai/dsh-tool-web` | `web_fetch`, `web_search` | `ctx.tools`, `ctx.web`, `ctx.systemPrompt` | `tool/call`, `tool/result` | - | web_search and web_fetch keep provider selection behind ctx.web so model-visible schemas stay stable across backend swaps. |
+| `@deepseek-ai/dsh-tool-council` | `council`, `council_capacity`, `pipeline`, `propose`, `save_pipeline_preset`, `swarm` | `ctx.tools`, `ctx.settings`, `ctx.systemPrompt`, `ctx.agents`, `ctx.web` | `tool/call`, `tool/result`, `settings writes in the `council` namespace (gates, run state, saved runs)` | - | Every council tool spends real provider allowance, so each stops at a two-factor gate: a button press writes an approval id into settings, a channel no model-facing tool can reach, and a later user turn spends it. Single use, 15-minute TTL. `pipeline` advances ONE stage per call through an order the run itself carries (`council,swarm,review` by default; `council,propose,swarm,review` for work that has to produce code), and parks rather than fails when a seat runs out of subscription allowance. `propose` is the only tool whose output is code, and it writes nothing into a repository: a seat emits WRITE: blocks and the HOST writes them under a tree belonging to that seat alone, refusing anything that would land outside it. `save_pipeline_preset` is the one deliberate exception to settings being closed to model-facing tools, because a preset is only text the user later chooses to press. |
 
 <a id="deepseek-aidsh-tool-ask-user"></a>
 
@@ -1772,6 +1773,19 @@ List the Lead and every durable teammate with current runtime status.
 
 Source: [`packages/experimental/tool-agent-team/src/index.ts`](../packages/experimental/tool-agent-team/src/index.ts)
 
+### `list_providers`
+
+List the subagent providers a teammate can be spawned on. Call this before spawn_teammate when choosing a provider, so the name is one that exists.
+
+```json
+{
+  "type": "object",
+  "properties": {}
+}
+```
+
+Source: [`packages/experimental/tool-agent-team/src/index.ts`](../packages/experimental/tool-agent-team/src/index.ts)
+
 ### `send_message`
 
 Send durable information to another Team member without starting an idle member.
@@ -1800,7 +1814,7 @@ Source: [`packages/experimental/tool-agent-team/src/index.ts`](../packages/exper
 
 ### `spawn_teammate`
 
-Create one named, durable teammate. Only the Team Lead may call this tool.
+Create one named, durable teammate. Only the Team Lead may call this tool. Teammates may run on different providers: pick the one whose strengths match the delegated work rather than spawning every teammate on the default.
 
 ```json
 {
@@ -1825,6 +1839,10 @@ Create one named, durable teammate. Only the Team Lead may call this tool.
         "fresh",
         "fork"
       ]
+    },
+    "provider": {
+      "type": "string",
+      "description": "Subagent provider to run this teammate on. Omit to use the configured default. Call list_providers first to see what is registered — an unknown name is rejected."
     }
   },
   "required": [
@@ -2219,3 +2237,213 @@ Search the web for current information. Provide 1–4 queries in the required qu
 Source: [`packages/web/tool-web/src/index.ts`](../packages/web/tool-web/src/index.ts)
 
 web_search and web_fetch keep provider selection behind ctx.web so model-visible schemas stay stable across backend swaps.
+
+<a id="deepseek-aidsh-tool-council"></a>
+
+## `@deepseek-ai/dsh-tool-council`
+
+### `council`
+
+Ask a multi-model council (Claude, OpenAI, Kimi, DeepSeek) to answer a question, review each other, and vote on the best answer. The `report` field is a complete, formatted, user-facing document showing every seat answer, every vote, and the collective answer — reproduce it verbatim in your reply rather than summarising it.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "The question to put to the council."
+    },
+    "plan": {
+      "type": "string",
+      "description": "An approved plan. Supplying it skips the planning round and runs the full council against this direction."
+    },
+    "planOnly": {
+      "type": "boolean",
+      "description": "Stop after the planning round and return the plan without spending the drafting and review rounds."
+    },
+    "skipPlan": {
+      "type": "boolean",
+      "description": "Skip planning and go straight to drafting."
+    },
+    "planMode": {
+      "type": "string",
+      "description": "single: one seat writes the plan. council: every seat proposes one and the council votes. Defaults to the configured mode.",
+      "enum": [
+        "single",
+        "council"
+      ]
+    },
+    "noColor": {
+      "type": "boolean",
+      "description": "Disable ANSI colour in the console report."
+    },
+    "sequential": {
+      "type": "boolean",
+      "description": "Run seats one at a time instead of in parallel."
+    },
+    "resume": {
+      "type": "string",
+      "description": "Amend a finished run instead of starting one: re-ask ONLY the seats that failed in it, keep every answer already collected, and re-tally. Pass the run id the report printed, or \"last\" for the most recent run. No new approval is needed — the approval that paid for the run still stands."
+    }
+  },
+  "required": [
+    "query"
+  ]
+}
+```
+
+Source: [`packages/council/tool-council/src/index.ts`](../packages/council/tool-council/src/index.ts)
+
+### `council_capacity`
+
+Project how much work a monthly configuration buys: OpenRouter budget plus subscription seats, calibrated against the work already done in this environment. An estimate, not a quote.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "openRouterUsd": {
+      "type": "number",
+      "description": "OpenRouter budget per month. Defaults to the configured monthly target."
+    },
+    "subscriptionSeats": {
+      "type": "integer",
+      "description": "Number of subscription CLI seats, e.g. 2 for Claude plus Codex."
+    },
+    "subscriptionTokensPerMonth": {
+      "type": "integer",
+      "description": "Output tokens one subscription seat can produce per month. Supply this if you know your plan limits; it is not discoverable from any CLI."
+    },
+    "observationDays": {
+      "type": "integer",
+      "description": "How many days of local history to calibrate against. Defaults to 7."
+    }
+  }
+}
+```
+
+Source: [`packages/council/tool-council/src/index.ts`](../packages/council/tool-council/src/index.ts)
+
+### `pipeline`
+
+Run a request through the whole chain: the council agrees the approach, the swarm splits and runs it, then the council reviews what came back. Advances ONE stage per call and stops at each stage's own gate. Call it again to continue; it resumes where it stood, including after a quota hold. For work that has to produce CODE, pass stages as `council,propose,swarm,review`: the proposing stage has every seat write its own version into a sandbox tree of its own, so there is something to look at and pick between before the swarm splits the job up.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "The work, in the user's own words. Omit to continue the run already in progress."
+    },
+    "restart": {
+      "type": "boolean",
+      "description": "Abandon the run in progress and start a new one at the first stage."
+    },
+    "stages": {
+      "type": "string",
+      "description": "Stage order for a NEW run, comma separated, drawn from `council`, `propose`, `swarm`, `review`. Defaults to `council,swarm,review`. Ignored while a run is in progress: the order is fixed when it starts."
+    }
+  }
+}
+```
+
+Source: [`packages/council/tool-council/src/index.ts`](../packages/council/tool-council/src/index.ts)
+
+### `propose`
+
+Have every configured seat independently write its own version of the same code change, each into its own working tree, then hold a council vote on which version should be implemented. Nothing is written to the real repositories. STOPS for approval; it never writes on its first call.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "task": {
+      "type": "string",
+      "description": "The change to implement, in the user own terms."
+    },
+    "sequential": {
+      "type": "boolean",
+      "description": "Ask seats one at a time instead of together."
+    }
+  },
+  "required": [
+    "task"
+  ]
+}
+```
+
+Source: [`packages/council/tool-council/src/index.ts`](../packages/council/tool-council/src/index.ts)
+
+### `save_pipeline_preset`
+
+Save a named, reusable pipeline run so the user can fire it from a button instead of retyping it. Ids are `area/name` in lowercase kebab, such as `dsh/gate-audit`. Saves the request only: it starts nothing, spends nothing, and approves nothing.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Preset id, `area/name` in lowercase kebab."
+    },
+    "query": {
+      "type": "string",
+      "description": "The whole request the run should carry. Required unless removing."
+    },
+    "name": {
+      "type": "string",
+      "description": "Button label. Defaults to the name half of the id."
+    },
+    "autoAdvance": {
+      "type": "boolean",
+      "description": "Advance between stages without being asked. Approval gates still apply."
+    },
+    "stages": {
+      "type": "string",
+      "description": "Stage order this run needs, comma separated, from `council`, `propose`, `swarm`, `review`. Use `council,propose,swarm,review` for work that has to produce code. Defaults to `council,swarm,review`."
+    },
+    "replace": {
+      "type": "boolean",
+      "description": "Permission to overwrite an id already in use."
+    },
+    "remove": {
+      "type": "boolean",
+      "description": "Delete this preset instead of saving one."
+    }
+  },
+  "required": [
+    "id"
+  ]
+}
+```
+
+Source: [`packages/council/tool-council/src/index.ts`](../packages/council/tool-council/src/index.ts)
+
+### `swarm`
+
+Split a request into units of work and run them across the configured seats, in dependency waves. Decomposes and prices the work, then STOPS for approval; it never runs units on its first call. Use when the user knows what they want done and wants it divided rather than debated.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "The work to split, in the user own terms."
+    },
+    "sequential": {
+      "type": "boolean",
+      "description": "Run units one at a time instead of a wave at a time."
+    }
+  },
+  "required": [
+    "query"
+  ]
+}
+```
+
+Source: [`packages/council/tool-council/src/index.ts`](../packages/council/tool-council/src/index.ts)
+
+Every council tool spends real provider allowance, so each stops at a two-factor gate: a button press writes an approval id into settings, a channel no model-facing tool can reach, and a later user turn spends it. Single use, 15-minute TTL. `pipeline` advances ONE stage per call through an order the run itself carries (`council,swarm,review` by default; `council,propose,swarm,review` for work that has to produce code), and parks rather than fails when a seat runs out of subscription allowance. `propose` is the only tool whose output is code, and it writes nothing into a repository: a seat emits WRITE: blocks and the HOST writes them under a tree belonging to that seat alone, refusing anything that would land outside it. `save_pipeline_preset` is the one deliberate exception to settings being closed to model-facing tools, because a preset is only text the user later chooses to press.

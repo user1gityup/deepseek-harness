@@ -7,7 +7,8 @@
  */
 
 import { globSync, readFileSync, writeFileSync } from 'node:fs'
-import { basename, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
+import { basename, join, resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
@@ -29,6 +30,8 @@ import type { ImageAttachmentLimits, ImageAttachmentRef, SaveImageAttachment, St
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import PlanModeController from '@deepseek-ai/dsh-plan-mode'
 import WebRuntime from '@deepseek-ai/dsh-web'
+import FileSettingsProvider from '@deepseek-ai/dsh-settings-file'
+import * as ToolCouncil from '@deepseek-ai/dsh-tool-council'
 import * as WebSearchExa from '@deepseek-ai/dsh-web-search-exa'
 import * as WebFetchLocal from '@deepseek-ai/dsh-web-fetch-http'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
@@ -527,10 +530,15 @@ const TOOL_PACKAGES: ToolPackage[] = [
     pkg: '@deepseek-ai/dsh-experimental-tool-agent-team',
     dir: 'tool-agent-team',
     source: 'packages/experimental/tool-agent-team/src/index.ts',
-    requires: ['ctx.tools', 'ctx.systemPrompt', 'ctx.agentTeams', 'an exact live Team member Agent'],
+    requires: ['ctx.tools', 'ctx.systemPrompt', 'ctx.agentTeams', 'ctx.subagents', 'an exact live Team member Agent'],
     writes: ['tool/call', 'team/member', 'team/message/queued', 'team/message/delivered', 'team/task', 'tool/result'],
     async mount(ctx) {
       await ctx.plugin(AgentRegistry)
+      // `subagents` joined the plugin's inject when per-teammate providers
+      // landed, and this entry was not updated with it: cordis left the whole
+      // plugin PENDING, so the package booted registering nothing at all.
+      await ctx.plugin(SubagentRuntime)
+      registerCatalogSubagentProvider(ctx, 'mock')
       await ctx.plugin(SessionStore)
       const session = ctx.sessions.create(SessionId('tool-catalog-team-lead'))
       let agent!: Agent
@@ -605,6 +613,26 @@ const TOOL_PACKAGES: ToolPackage[] = [
     },
     note:
       'web_search and web_fetch keep provider selection behind ctx.web so model-visible schemas stay stable across backend swaps.',
+  },
+  {
+    pkg: '@deepseek-ai/dsh-tool-council',
+    dir: 'tool-council',
+    source: 'packages/council/tool-council/src/index.ts',
+    requires: ['ctx.tools', 'ctx.settings', 'ctx.systemPrompt', 'ctx.agents', 'ctx.web'],
+    writes: ['tool/call', 'tool/result', 'settings writes in the `council` namespace (gates, run state, saved runs)'],
+    async mount(ctx) {
+      // A settings PROVIDER, pointed at a throwaway file. The council injects
+      // `settings` and does not register its namespace without one, so the
+      // harvest would silently catalogue nothing — and the real
+      // `~/.dsh/settings.yaml` must not be touched by a docs generator, which
+      // is why the path is passed explicitly rather than defaulted.
+      await ctx.plugin(AgentRegistry)
+      await ctx.plugin(FileSettingsProvider, { path: join(tmpdir(), 'dsh-tool-catalog-settings.yaml') })
+      await ctx.plugin(WebRuntime)
+      await ctx.plugin(ToolCouncil)
+    },
+    note:
+      'Every council tool spends real provider allowance, so each stops at a two-factor gate: a button press writes an approval id into settings, a channel no model-facing tool can reach, and a later user turn spends it. Single use, 15-minute TTL. `pipeline` advances ONE stage per call through an order the run itself carries (`council,swarm,review` by default; `council,propose,swarm,review` for work that has to produce code), and parks rather than fails when a seat runs out of subscription allowance. `propose` is the only tool whose output is code, and it writes nothing into a repository: a seat emits WRITE: blocks and the HOST writes them under a tree belonging to that seat alone, refusing anything that would land outside it. `save_pipeline_preset` is the one deliberate exception to settings being closed to model-facing tools, because a preset is only text the user later chooses to press.',
   },
 ]
 

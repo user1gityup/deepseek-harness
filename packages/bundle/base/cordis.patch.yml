@@ -172,6 +172,8 @@
     - id: sandbox-policy
       name: '@deepseek-ai/dsh-sandbox-policy'
       config:
+        requireWriteConfirmation: true
+        confinedOnly: true
         mode: !!js process.env.DSH_PERMISSION_MODE ?? 'workspace-write'
         workspaceRoot: !!js process.cwd()
 
@@ -200,9 +202,6 @@
           workspace-write:
             sandbox: workspace-write
             approval: ask
-          danger-full-access:
-            sandbox: danger-full-access
-            approval: never
         # Start every new session unable to write without asking. workspace-write
         # permits writes anywhere inside the working directory with no prompt,
         # which is how an unrequested project got built on disk. Escalate per

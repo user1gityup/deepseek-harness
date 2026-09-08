@@ -55,6 +55,7 @@ export interface TaskCost {
 
 /** Estimated cost of a whole decomposition. */
 export interface ExecutionEstimate {
+  readonly countsCalls?: boolean | undefined
   readonly tasks: readonly TaskCost[]
   /** Units running concurrently, in execution order. */
   readonly waveSizes: readonly number[]
@@ -175,19 +176,20 @@ export function estimateExecution(
  * @returns markdown lines.
  */
 export function renderExecutionEstimate(estimate: ExecutionEstimate): readonly string[] {
+  const unit = estimate.countsCalls === true ? 'seat call(s)' : 'unit(s)'
   const out: string[] = [
-    `**Execution estimate** — ${String(estimate.tasks.length)} unit(s) in ${String(estimate.waveSizes.length)} wave(s) of ${estimate.waveSizes.join(', ')}`,
+    `**Execution estimate** — ${String(estimate.tasks.length)} ${unit} in ${String(estimate.waveSizes.length)} wave(s) of ${estimate.waveSizes.join(', ')}`,
     '',
     `- Metered cost: **$${estimate.meteredUsd.toFixed(4)}**`,
   ]
   if (estimate.freeCount > 0) {
-    out.push(`- On a free seat (no cost, no quota): ${String(estimate.freeCount)} unit(s)`)
+    out.push(`- On a free seat (no cost, no quota): ${String(estimate.freeCount)} ${unit}`)
   }
   if (estimate.includedCount > 0) {
-    out.push(`- On subscription (no metered cost, but spends quota): ${String(estimate.includedCount)} unit(s)`)
+    out.push(`- On subscription (no metered cost, but spends quota): ${String(estimate.includedCount)} ${unit}`)
   }
   if (estimate.unpricedCount > 0) {
-    out.push(`- Unpriced, so missing from the total: ${String(estimate.unpricedCount)} unit(s)`)
+    out.push(`- Unpriced, so missing from the total: ${String(estimate.unpricedCount)} ${unit}`)
   }
   out.push('')
   for (const caveat of estimate.caveats) out.push(`> ${caveat}`)

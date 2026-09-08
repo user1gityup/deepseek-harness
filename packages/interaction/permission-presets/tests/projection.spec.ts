@@ -20,6 +20,9 @@ import CommandRuntime from '@deepseek-ai/dsh-commands'
 import PermissionPresetService from '@deepseek-ai/dsh-permission-presets'
 import type { Config } from '@deepseek-ai/dsh-permission-presets'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
+import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
+import { agentEvents } from '@deepseek-ai/dsh-agent'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 async function harness(options: { withPermission?: boolean; config?: Config } = {}): Promise<{ ctx: Context; session: Session }> {
   const ctx = new Context()
@@ -87,6 +90,21 @@ describe('permissions projection unit', () => {
 })
 
 describe('/permission command', () => {
+  it('approves without writing, requires a later go, and disallows full access', async () => {
+    const { ctx, session } = await harness()
+    await ctx.plugin(SandboxPolicyService, { requireWriteConfirmation: true, confinedOnly: true })
+    const { agent } = await agentFor(ctx, session)
+    const signal = new AbortController().signal
+    const approval = await ctx.commands.execute(agent, '/permission workspace-write', [], signal)
+    expect(approval?.result).toMatchObject({ kind: 'success', text: expect.stringContaining('Send exactly "go"') })
+    expect(ctx.sandboxPolicy.resolve({ session }).mode).toBe('read-only')
+    const go = createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+    await agentEvents(ctx, agent).waterfall('agent/pre-step', { messages: [go], turn: 1, step: 1, signal },
+      () => Promise.resolve({ kind: 'enter', messages: [go] }))
+    expect(ctx.sandboxPolicy.resolve({ session }).mode).toBe('workspace-write')
+    expect((await ctx.commands.execute(agent, '/permission danger-full-access', [], signal))?.result)
+      .toEqual({ kind: 'error', text: 'Unconfined access is disabled.' })
+  })
   it('switches through permission.set and logs the lifecycle pair', async () => {
     const { ctx, session } = await harness()
     const { agent, inject } = await agentFor(ctx, session)

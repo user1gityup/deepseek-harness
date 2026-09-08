@@ -10,6 +10,10 @@ Filesystem tools, one-shot bash commands, and terminal sessions may enforce the 
 
 ## Config
 
+- `requireWriteConfirmation` — the user selects workspace-write in the session permission control, then sends exactly go in that session. Neither alone enables writes; per-file escalation cannot bypass this. Delegated agents cannot approve themselves. Read-only selection, disposal or restart revokes the grant.
+- `confinedOnly` — rejects full-access escalation and resolves saved unconfined modes to read-only. The base bundle enables both switches; local CLI seat permissions remain independent.
+- `writeApprovalTtlMs` — pending approval lifetime, default 900,000 milliseconds. Confirmed grants last until revoked or the policy instance ends.
+
 - `mode` — the deployment default `SandboxMode` (`read-only` / `workspace-write` / `danger-full-access`), validated at load. Default `read-only` (fail-safe).
 - `workspaceRoot` — the fallback directory `workspace-write` may write under for agentless calls or sessions without a cwd. Default `process.cwd()`, resolved to its absolute filesystem identity either way. A normal agent call uses its session header's immutable `cwd` instead.
 

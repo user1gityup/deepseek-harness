@@ -180,6 +180,9 @@ export interface Config {
    * debate and getting a graph of workers.
    */
   pendingSwarmId?: string
+  swarmProfile?: 'economy' | 'fastest'
+  pendingSwarmProfile?: string
+  pipelineProfile?: string
   /** The request that graph serves, shown on the Approve control. */
   pendingSwarmQuery?: string
   /**
@@ -220,6 +223,7 @@ export interface Config {
    * required fields at boot.
    */
   pipelinePresets?: Record<string, {
+    mode?: 'council' | 'economy' | 'fastest'
     name?: string
     query?: string
     /** Advance the chain without waiting to be asked between stages. */
@@ -400,12 +404,16 @@ export const Config: z<Config> = z.object({
   approvedPlanId: z.string(),
   approvedAt: z.number(),
   pendingSwarmId: z.string(),
+  swarmProfile: z.union(['economy', 'fastest']),
+  pendingSwarmProfile: z.string(),
+  pipelineProfile: z.string(),
   pendingSwarmQuery: z.string(),
   pendingSwarmTasks: z.string(),
   pendingSwarmIssuedAt: z.number(),
   approvedSwarmId: z.string(),
   approvedSwarmAt: z.number(),
   pipelinePresets: z.dict(z.object({
+    mode: z.union(['council', 'economy', 'fastest']),
     name: z.string(),
     query: z.string(),
     autoAdvance: z.boolean(),
@@ -1268,6 +1276,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       // the approval was given for what the user read, not for whatever a
       // second planning call would return.
       const storedTasks = approved ? readStoredTasks(settingsNow.pendingSwarmTasks) : undefined
+      const selectedProfile = approved && storedTasks !== undefined ? settingsNow.pendingSwarmProfile : settingsNow.swarmProfile
+      const profile = selectedProfile === 'economy' || selectedProfile === 'fastest' ? selectedProfile : undefined
       const pricing = await fetchModelPricing(exec.signal)
       const result = await runSwarm({
         // Once approved, run the request the graph was written for. The turn
@@ -1276,7 +1286,9 @@ export function apply(ctx: Context, config: Config = {}): void {
           ? settingsNow.pendingSwarmQuery
           : args.query,
         seats: currentSeats(),
-        overrides: config.swarmRoster ?? {},
+        overrides: settingsNow.swarmRoster ?? {},
+        profile,
+        ...(profile === undefined || parseRoots(config.fileRoots).length === 0 ? {} : proposalWorkspace(approved)),
         approved,
         apiKey,
         pricing,
@@ -1306,6 +1318,7 @@ export function apply(ctx: Context, config: Config = {}): void {
               pendingSwarmId: issuedId,
               pendingSwarmQuery: result.query,
               pendingSwarmTasks: JSON.stringify(result.tasks),
+              pendingSwarmProfile: profile ?? '',
               pendingSwarmIssuedAt: Date.now(),
               // A newly issued graph voids any earlier approval outright.
               approvedSwarmId: '',
@@ -1395,6 +1408,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       + 'every seat write its own version into a sandbox tree of its own, so there is something to look at and '
       + 'pick between before the swarm splits the job up.',
     parameters: {
+      mode: { type: 'string', enum: ['council', 'economy', 'fastest'], description: 'Mode for a new run. Economy contests each unit with free workers and paid review; fastest uses paid workers. Council stops after deliberation.' },
       query: { type: 'string', description: 'The work, in the user\'s own words. Omit to continue the run already in progress.' },
       restart: { type: 'boolean', description: 'Abandon the run in progress and start a new one at the first stage.' },
       stages: {
@@ -1413,6 +1427,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       const apiKey = resolveOpenRouterKey({ variable: config.apiKeyEnv })
       const settingsNow = live()
       const running = settingsNow.pipelineId !== undefined && settingsNow.pipelineId !== ''
+      const selectedProfile = running && args.restart !== true ? settingsNow.pipelineProfile : args.mode ?? settingsNow.swarmProfile
+      const profile = selectedProfile === 'economy' || selectedProfile === 'fastest' ? selectedProfile : undefined
       const storedTasks = readStoredTasks(settingsNow.pipelineTasks)
       const storedStage = settingsNow.pipelineStage ?? ''
       const storedCandidates = readStoredCandidates(settingsNow.pipelineCandidates)
@@ -1422,7 +1438,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       // given, and index a stage the earlier calls never ran.
       const order = running && args.restart !== true
         ? parseStages(settingsNow.pipelineStages)
-        : parseStages(args.stages)
+        : selectedProfile === 'council' ? parseStages('council') : parseStages(args.stages)
 
       const state: PipelineState = running && args.restart !== true
         ? {
@@ -1511,7 +1527,10 @@ export function apply(ctx: Context, config: Config = {}): void {
             const swarm = await runSwarm({
               query: swarmQuery(input, settingsNow.pipelinePicked ?? ''),
               seats: seatsNow,
-              overrides: config.swarmRoster ?? {},
+              overrides: settingsNow.swarmRoster ?? {},
+              profile,
+              picked: settingsNow.pipelinePicked || undefined,
+              ...(profile === undefined || parseRoots(config.fileRoots).length === 0 ? {} : proposalWorkspace(approved)),
               approved,
               apiKey,
               pricing,
@@ -1651,7 +1670,7 @@ export function apply(ctx: Context, config: Config = {}): void {
             : input.query
           const council = await runCouncil({
             query: question,
-            seats: seatsNow,
+            seats: profile === undefined ? seatsNow : seatsNow.filter(seat => seat.free !== true),
             apiKey,
             timeoutMs,
             signal: exec.signal,
@@ -1722,6 +1741,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         pipelineStages: stagesOf(result.state).join(','),
         pipelinePlan: result.state.plan ?? '',
         pipelineWinner: result.state.winner ?? '',
+        pipelineProfile: profile ?? '',
         pipelineTasks: result.state.tasks === undefined ? '' : JSON.stringify(result.state.tasks),
         pipelineUnits: result.state.units === undefined ? '' : JSON.stringify(result.state.units),
         pipelineCandidates: result.state.candidates === undefined ? '' : JSON.stringify(result.state.candidates),
@@ -1763,6 +1783,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       + 'Ids are `area/name` in lowercase kebab, such as `dsh/gate-audit`. '
       + 'Saves the request only: it starts nothing, spends nothing, and approves nothing.',
     parameters: {
+      mode: { type: 'string', enum: ['council', 'economy', 'fastest'], description: 'Execution mode saved with this preset; saving does not start or approve a run.' },
       id: { type: 'string', required: true, description: 'Preset id, `area/name` in lowercase kebab.' },
       query: { type: 'string', description: 'The whole request the run should carry. Required unless removing.' },
       name: { type: 'string', description: 'Button label. Defaults to the name half of the id.' },
@@ -1790,6 +1811,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           args.id,
           {
             name: args.name ?? '',
+            ...(args.mode === undefined ? {} : { mode: args.mode }),
             query: args.query ?? '',
             ...(args.autoAdvance === undefined ? {} : { autoAdvance: args.autoAdvance }),
             // Normalised through the same parser the tool uses, so a preset can

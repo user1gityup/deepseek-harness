@@ -20,6 +20,8 @@ import type { Evidence, SearchSeam } from './evidence.ts'
 import { askSeat, probeSeat } from './seats.ts'
 import { failedSeats } from './runs.ts'
 import type { RunRecord } from './runs.ts'
+import { mergePlan } from './merge.ts'
+import type { PlanMerge } from './merge.ts'
 
 /** One seat's review of the drafts, with its vote. */
 export interface SeatReview {
@@ -113,6 +115,8 @@ export interface CouncilResult {
   readonly planReviews?: readonly SeatReview[] | undefined
   /** How the winning plan won. */
   readonly planVerdict?: Verdict | undefined
+  /** Attributed additions after the plan vote; the winner remains the author. */
+  readonly planMerge?: PlanMerge | undefined
   /** Why the Approve control could not be offered, when it could not. */
   readonly issueProblem?: string | undefined
   /** The stored run this result belongs to, once one has been filed. */
@@ -835,6 +839,7 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
   let planDrafts: SeatReply[] = []
   let planReviews: SeatReview[] = []
   let planVerdict: Verdict | undefined
+  let planMerge: PlanMerge | undefined
   if (plan === undefined && options.skipPlan !== true && options.planMode === 'council' && active.length > 1) {
     // Every seat proposes a plan, then the council votes on which to follow.
     // Costs a full extra round, and buys a plan the council actually agreed
@@ -882,6 +887,12 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
     if (chosen !== undefined && chosen.text !== '') {
       plan = chosen.text
       planSeat = chosen.seat
+      if (planVerdict.winner !== undefined && usablePlans.length > 1) {
+        planMerge = await mergePlan(options.query, chosen, usablePlans, active,
+          (seat, prompt) => ask(seat, 'plan', () => askSeat(seat, prompt, options.apiKey, options.signal, options.timeoutMs, options.memory)),
+          sequential)
+        plan = planMerge.plan
+      }
     }
   }
   if (plan === undefined && options.skipPlan !== true) {
@@ -909,6 +920,7 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
       planSeat,
       ...planFailures.length === 0 ? {} : { planFailures },
       ...planDrafts.length === 0 ? {} : { planDrafts, planReviews, planVerdict },
+      ...planMerge === undefined ? {} : { planMerge },
       budget,
       estimate: options.estimate,
       spentUsd: spendBetween(before, await readBalance(options.apiKey, options.signal)),
@@ -1067,6 +1079,7 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
   return {
     phase: 'full',
     ...planFailures.length === 0 ? {} : { planFailures },
+    ...planMerge === undefined ? {} : { planMerge },
     ...evidence === undefined ? {} : { evidenceUrls: evidence.urls, evidenceBlock: evidence.block },
     audits,
     plan,

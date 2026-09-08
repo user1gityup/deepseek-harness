@@ -286,6 +286,19 @@ export class PermissionPresetService extends Service {
           if (!this.names.includes(name)) {
             return { kind: 'error', text: `unknown preset "${name}" (available: ${this.names.join(', ')})` }
           }
+          const policy = this.ctx.get('sandboxPolicy')
+          const spec = this.resolve(name)
+          if (policy?.confinedOnly === true && spec.sandbox === 'danger-full-access') {
+            return { kind: 'error', text: 'Unconfined access is disabled.' }
+          }
+          if (policy?.requireWriteConfirmation === true) {
+            if (spec.sandbox === 'workspace-write') {
+              policy.approveWorkspaceWrites(agent.session)
+              this.ctx.approval.setPolicy(agent, 'ask')
+              return { kind: 'success', text: `Workspace writes approved for ${agent.session.header.cwd ?? policy.workspaceRoot}. Send exactly "go" in this session to enable them. Until then this session stays read-only.` }
+            }
+            policy.revokeWorkspaceWrites(agent.session)
+          }
           this.apply(agent.session, name, (policy) =>{  this.ctx.approval.setPolicy(agent, policy) })
           return { kind: 'success', text: `preset ${name}` }
         },

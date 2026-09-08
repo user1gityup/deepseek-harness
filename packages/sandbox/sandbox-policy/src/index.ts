@@ -25,7 +25,7 @@ import type {} from '@deepseek-ai/dsh-agent'
 import { canonicalPath, type SandboxExecutionPolicy, type SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import { effectiveSandboxMode } from './session-mode.ts'
+import { effectiveSandboxMode, setSandboxMode } from './session-mode.ts'
 
 export { SANDBOX_MODES, effectiveSandboxMode, setSandboxMode } from './session-mode.ts'
 
@@ -65,6 +65,12 @@ declare module '@deepseek-ai/cordis' {
  * is any per-family knob: this is the one shared policy home.
  */
 export interface Config {
+  /** Require a session permission selection followed by a direct human `go` before writes. */
+  requireWriteConfirmation?: boolean
+  /** Refuse unconfined execution, including explicit escalation requests. */
+  confinedOnly?: boolean
+  /** Milliseconds in which a pending write approval may be confirmed. */
+  writeApprovalTtlMs?: number
   /** File-sandbox mode a session starts from (default: `read-only`). */
   mode?: SandboxMode
   /**
@@ -91,6 +97,9 @@ export interface SandboxPolicyRequest {
 export class SandboxPolicyService extends Service {
   // Inline schema call: the config catalog walks `static Config` statically.
   static Config: z<Config> = z.object({
+    requireWriteConfirmation: z.boolean().default(false),
+    confinedOnly: z.boolean().default(false),
+    writeApprovalTtlMs: z.number().min(1).default(900_000),
     mode: z.union(['read-only', 'workspace-write', 'danger-full-access'] as const).default('read-only'),
     // No schema default: process.cwd() is resolved in the constructor so the
     // stored root is always absolute regardless of how it was supplied.
@@ -101,6 +110,11 @@ export class SandboxPolicyService extends Service {
   readonly defaultMode: SandboxMode
   /** The absolute `workspace-write` fallback root for calls without a session cwd. */
   readonly workspaceRoot: string
+  /** Whether this deployment requires the two-step workspace write gate. */
+  readonly requireWriteConfirmation: boolean
+  /** Whether unconfined modes are forbidden in this deployment. */
+  readonly confinedOnly: boolean
+  private readonly writeApprovals = new WeakMap<Session, { expiresAt: number; confirmed: boolean; priorMessageIds: Set<string> }>()
   constructor(ctx: Context, config: Config) {
     super(ctx, 'sandboxPolicy')
     // schemastery (static Config) already filled `mode`; the cast records that
@@ -108,6 +122,27 @@ export class SandboxPolicyService extends Service {
     // the process cwd is real branching, resolved absolute either way.
     this.defaultMode = config.mode as SandboxMode
     this.workspaceRoot = resolveWorkspaceRoot(config.workspaceRoot ?? process.cwd())
+    this.requireWriteConfirmation = config.requireWriteConfirmation === true
+    this.confinedOnly = config.confinedOnly === true
+    this.writeApprovalTtlMs = config.writeApprovalTtlMs as number
+    ctx.on('session/event', (session, event) => {
+      if (event.type === 'sandbox/mode' && event.data.mode !== 'workspace-write') this.writeApprovals.delete(session)
+    })
+
+    ctx.on('agent/pre-step', async ({ agent, messages }, next) => {
+      const decision = await next()
+      if (decision.kind === 'reject' || !this.requireWriteConfirmation) return decision
+      const pending = this.writeApprovals.get(agent.session)
+      if (pending === undefined || pending.confirmed || Date.now() > pending.expiresAt) return decision
+      if ((agent.session.header.delegationDepth ?? 0) !== 0) return decision
+      const human = messages.filter(message => message.source.kind === 'user').at(-1)
+      const text = human?.content.map(block => block.type === 'text' ? block.text : '').join('').trim()
+      if (human !== undefined && !pending.priorMessageIds.has(human.id) && text?.toLowerCase() === 'go') {
+        setSandboxMode(agent.session, 'workspace-write')
+        pending.confirmed = true
+      }
+      return decision
+    })
 
     ctx.inject(['systemPrompt'], (scope: Context) => {
       scope.systemPrompt.context({
@@ -117,7 +152,9 @@ export class SandboxPolicyService extends Service {
           const session = context.agent?.session
           return session === undefined
             ? ''
-            : renderPolicyContext(this.resolve({ session }))
+            : this.requireWriteConfirmation && this.resolve({ session }).mode === 'read-only'
+              ? 'Current DSH file policy: read-only. Workspace writes require the user to select workspace-write in this session\'s permission control, then send exactly "go" in this session. An approval alone, a go alone, or a per-file escalation cannot open this gate. Unconfined access is unavailable.'
+              : renderPolicyContext(this.resolve({ session }))
         },
       })
     })
@@ -134,11 +171,46 @@ export class SandboxPolicyService extends Service {
    */
   resolve(request: SandboxPolicyRequest = {}): SandboxExecutionPolicy {
     const { session } = request
+    let mode = request.mode ?? (session === undefined ? undefined : this.overrideOf(session)) ?? this.defaultMode
+    if (this.confinedOnly && mode === 'danger-full-access') {
+      if (request.mode !== undefined) throw new Error('Unconfined access is disabled; use the approved session workspace.')
+      mode = 'read-only'
+    }
+    if (this.requireWriteConfirmation && mode !== 'read-only'
+      && (session === undefined || this.writeApprovals.get(session)?.confirmed !== true)) mode = 'read-only'
     return {
-      mode: request.mode ?? (session === undefined ? undefined : this.overrideOf(session)) ?? this.defaultMode,
+      mode,
       workspaceRoot: resolveWorkspaceRoot(session?.header.cwd ?? this.workspaceRoot),
       ...session === undefined ? {} : { sessionId: session.id },
     }
+  }
+
+  private readonly writeApprovalTtlMs: number
+
+  /**
+   * Arm workspace writes from the human permission control; never enables writes by itself.
+   * @param session - the exact top-level session being approved.
+   */
+  approveWorkspaceWrites(session: Session): void {
+    if ((session.header.delegationDepth ?? 0) !== 0) throw new Error('Delegated agents cannot approve workspace writes.')
+    setSandboxMode(session, 'read-only')
+    const priorMessageIds = new Set<string>()
+    for (const event of session.events) {
+      if (event.type === 'user/message') priorMessageIds.add(event.data.id)
+      if (event.type === 'agent/inbox/spliced') {
+        for (const message of event.data.inserted) priorMessageIds.add(message.id)
+      }
+    }
+    this.writeApprovals.set(session, { expiresAt: Date.now() + this.writeApprovalTtlMs, confirmed: false, priorMessageIds })
+  }
+
+  /**
+   * Retire any pending or active workspace write grant.
+   * @param session - session whose grant is being revoked.
+   */
+  revokeWorkspaceWrites(session: Session): void {
+    this.writeApprovals.delete(session)
+    setSandboxMode(session, 'read-only')
   }
 
   /**

@@ -146,6 +146,17 @@ export function renderReport(result: CouncilResult, palette: Palette): string {
     return out.join('\n')
   }
   if (result.plan !== undefined && result.plan !== '') {
+    if (result.planMerge !== undefined) {
+      out.push('PLAN MERGE — original vote unchanged')
+      for (const piece of result.planMerge.accepted) {
+        out.push(`From ${piece.source}; supported by ${piece.supporters.join(', ')}: ${piece.quote}`)
+      }
+      if (result.planMerge.accepted.length === 0) out.push('No rival piece received two endorsements; original plan retained.')
+      if (result.planMerge.integration !== undefined && (result.planMerge.integration.error !== undefined || result.planMerge.integration.text.trim() === '')) {
+        out.push('Winner integration failed; original plan retained.')
+      }
+      out.push('')
+    }
     out.push(palette.muted(RULE))
     const author = result.planSeat === undefined ? 'PLAN' : `PLAN (${nameOf(result.seats, result.planSeat)})`
     out.push(author)

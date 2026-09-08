@@ -80,13 +80,13 @@ export function readStages(text: string | undefined): readonly string[] {
  * @param stages - the stage order this run needs, when it is not the default.
  * @returns the prompt text.
  */
-export function startPrompt(request: string, stages: string = ''): string {
+export function startPrompt(request: string, stages: string = '', mode = ''): string {
   // The order rides in the prompt because that is the only channel the panel
   // has to the tool. A saved build run that could not say "propose" here got
   // the default three-stage chain no matter what its text described, which is
   // exactly how a run that asked for code samples produced none.
   const order = stages.trim() === '' ? '' : ` Pass stages as \`${stages.trim()}\`.`
-  return `Run the pipeline tool on this request, one stage at a time.${order} Request: ${request}`
+  return `Run the pipeline tool on this request, one stage at a time.${order}${mode === '' ? '' : ` Pass mode as \`${mode}\`.`} Request: ${request}`
 }
 
 /** The prompt that abandons the run in progress and starts a fresh one. */
@@ -194,7 +194,7 @@ export function PipelineControl({ t, settings, send }: PipelineControlProps): JS
   const presets = Object.entries(
     (section?.['pipelinePresets'] ?? {}) as Record<
       string,
-      { name?: string; query?: string; autoAdvance?: boolean; stages?: string }
+      { name?: string; query?: string; autoAdvance?: boolean; stages?: string; mode?: string }
     >,
   )
     .filter(([, preset]) => typeof preset.query === 'string' && preset.query !== '')
@@ -267,7 +267,7 @@ export function PipelineControl({ t, settings, send }: PipelineControlProps): JS
   const start = (): void => {
     if (outgoing === '') return
     const wanted = chosen?.autoAdvance === true
-    void go(startPrompt(outgoing, outgoingStages)).then((sent) => {
+    void go(startPrompt(outgoing, outgoingStages, chosen?.mode ?? '')).then((sent) => {
       if (!sent) return
       void settings.set('pipelineAuto', wanted)
       advanced.current = ''
@@ -490,7 +490,7 @@ export function PipelineControl({ t, settings, send }: PipelineControlProps): JS
           that never scrolls away; the tab stop is what makes that scroll
           reachable without a mouse. */}
       {!running && outgoing !== ''
-        ? <p className={css.preview} tabIndex={0}>{startPrompt(outgoing, outgoingStages)}</p>
+        ? <p className={css.preview} tabIndex={0}>{startPrompt(outgoing, outgoingStages, chosen?.mode ?? '')}</p>
         : null}
 
       {/* A press that did not reach the session says so here, with the reason

@@ -149,3 +149,7 @@ Docs accompany every code change: update affected README and JSDoc contracts tog
 ## Vendoring policy
 
 `vendor/` packages are pinned source copies (manifest with upstream SHAs in [vendor/README.md](vendor/README.md)). Update via the sync procedure there; re-apply or retire the logged local modifications; rerun `pnpm run test && pnpm run build`.
+
+## Local gatekeeper handoff
+
+For this private checkout, finalized work requested for queueing follows the shared gatekeeper handoff documented in `C:/Users/ndi2/.claude/shared-brain/git-gatekeeper-agent.md`. Local CLI agents review, verify and commit before invoking the documented `queue-build.mjs` helper; the user-operated monitor requires separate human approval before pushing. DSH API agents keep staged code under their session workspace's `.dsh-staging` directory after workspace-write approval plus `go`; they must not write the shared queue or invoke a host helper outside their sandbox. A local agent may later apply and commit that staging batch under its own authorization. The producer queues a specific committed HEAD and never commits or pushes. Do not run a second push owner alongside the monitor. This section installs an agent finalization workflow, not an automatic pipeline hook.

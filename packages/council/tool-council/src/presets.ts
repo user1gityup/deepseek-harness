@@ -17,6 +17,7 @@
 
 /** One saved run. */
 export interface PresetEntry {
+  readonly mode?: 'council' | 'economy' | 'fastest' | undefined
   /** The button label. */
   readonly name: string
   /** The whole request, written out once. */
@@ -130,6 +131,7 @@ export function savePreset(
         // never a blank button.
         name: name === '' ? (id.split('/')[1] ?? id) : name,
         query,
+        ...(entry.mode === undefined ? {} : { mode: entry.mode }),
         ...(entry.autoAdvance === undefined ? {} : { autoAdvance: entry.autoAdvance }),
         ...(entry.stages === undefined || entry.stages.trim() === '' ? {} : { stages: entry.stages.trim() }),
       },

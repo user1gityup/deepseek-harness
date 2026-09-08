@@ -1,11 +1,12 @@
 /**
  * Seat definitions and the two transports that back them.
  *
- * Two seats are driven by an already-authenticated local CLI, and two by the
- * OpenRouter HTTP API. The council never handles a CLI seat's credentials: the
- * user authenticated that tool once, and the child process inherits the
- * session. Only the OpenRouter transport needs a key, and it reads one from the
- * environment rather than accepting it as an argument.
+ * Some seats are driven by an already-authenticated local CLI, the rest by an
+ * OpenAI-compatible HTTP endpoint. The council never handles a CLI seat's
+ * credentials: the user authenticated that tool once, and the child process
+ * inherits the session. Only a seat calling OpenRouter itself needs a key, and
+ * it reads one from the environment rather than accepting it as an argument; a
+ * seat pointed at a local proxy needs none, because the proxy holds the key.
  */
 
 import { spawn } from 'node:child_process'
@@ -76,6 +77,26 @@ export interface SeatConfig {
   readonly env?: Readonly<Record<string, string>> | undefined
   /** For `openrouter`: the model identifier to request. */
   readonly model?: string | undefined
+  /**
+   * For `openrouter`: chat-completions endpoint, overriding OpenRouter's own.
+   *
+   * The wire format is unchanged — an OpenAI-compatible `/chat/completions`
+   * that streams SSE — so only the URL differs. This is what lets a seat run
+   * against a local proxy without inventing a third transport: a dozen call
+   * sites branch on `transport === 'openrouter'` for prompt shaping, capacity
+   * and estimates, and a new transport value would silently miss some.
+   */
+  readonly baseUrl?: string | undefined
+  /**
+   * This seat costs nothing per token.
+   *
+   * Free is not the same as unpriced. An OpenRouter seat whose model carries
+   * no price row is of *unknown* cost, and the panel says so; a seat marked
+   * free is known to be zero, so it stays out of the metered blend entirely
+   * and the swarm sorts it beside the subscription seats rather than after
+   * them.
+   */
+  readonly free?: boolean | undefined
   /**
    * For `cli`: a flag that takes a context file path. When set and a memory
    * digest exists, the flag and path are appended to argv, which is far
@@ -186,6 +207,12 @@ export const DEFAULT_SEATS: readonly SeatConfig[] = [
     // and the run's 180s default killed it mid-retry. This buys it the room to
     // fall through to another provider rather than fail the round.
     timeoutMs: 420_000,
+    // The transport is `cli` like the paid seat, but the cost is not: the
+    // ANTHROPIC_BASE_URL above sends every request to the local proxy, so no
+    // subscription quota is spent. Without this flag the swarm reads the
+    // transport, calls the seat `included`, and cannot tell it apart from the
+    // subscription it exists to spare.
+    free: true,
     cwd: join(homedir(), '.dsh', 'seat-cwd'),
     enabled: false,
   },
@@ -219,6 +246,27 @@ export const DEFAULT_SEATS: readonly SeatConfig[] = [
     model: 'deepseek/deepseek-v4-pro',
     timeoutMs: 420_000,
     enabled: true,
+  },
+  {
+    id: 'openrouter-free',
+    name: 'OpenRouter Free',
+    transport: 'openrouter',
+    // The local free-model proxy speaks the same OpenAI-compatible wire
+    // format, so only the endpoint differs. It chooses the model itself from
+    // a warm pool of zero-priced OpenRouter models and rewrites the `model`
+    // field on the way through, which is why this placeholder never reaches
+    // anything that would reject it.
+    baseUrl: 'http://127.0.0.1:8080/v1/chat/completions',
+    model: 'proxy-auto',
+    free: true,
+    // Same measurement as the other free seat: zero-priced providers retry
+    // through capacity refusals before answering, and the run's default cap
+    // kills them mid-retry.
+    timeoutMs: 420_000,
+    // Off by default, for the reason `free-claude` is: it needs a local
+    // process running, and a seat that fails on every run of a fresh install
+    // is worse than one the user turns on.
+    enabled: false,
   },
 ]
 
@@ -569,7 +617,12 @@ export async function askOpenRouterSeat(
   webMaxResults?: number | undefined,
 ): Promise<SeatReply> {
   const started = Date.now()
-  if (apiKey === undefined || apiKey === '') {
+  // A seat pointed at a local proxy authenticates to that proxy, and the proxy
+  // holds the upstream key itself. Demanding a key here would make the free
+  // seat unusable on a machine that has no OpenRouter key at all — which is
+  // the case it exists for.
+  const endpoint = seat.baseUrl ?? OPENROUTER_URL
+  if (endpoint === OPENROUTER_URL && (apiKey === undefined || apiKey === '')) {
     return { seat: seat.id, text: '', error: 'no OpenRouter API key available', ms: 0 }
   }
   const model = seat.model
@@ -584,10 +637,10 @@ export async function askOpenRouterSeat(
   const stall = new AbortController()
   const composite = AbortSignal.any(signal === undefined ? [overall, stall.signal] : [signal, overall, stall.signal])
   try {
-    const response = await fetch(OPENROUTER_URL, {
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${apiKey}`,
+        ...apiKey === undefined || apiKey === '' ? {} : { 'Authorization': `Bearer ${apiKey}` },
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -674,24 +727,39 @@ export interface SeatBackend {
  * @returns the backend to probe, or undefined when there is nothing local to probe.
  */
 export function loopbackBackend(seat: SeatConfig): SeatBackend | undefined {
+  // A hosted seat pointed at a local proxy is as exposed to that proxy being
+  // down as a CLI seat is, and fails the same slow way: the request sits until
+  // the per-seat cap instead of being refused in a millisecond.
+  if (seat.baseUrl !== undefined) return loopbackOf(seat.baseUrl)
   if (seat.transport !== 'cli') return undefined
   const env = seat.env
   if (env === undefined) return undefined
   for (const [key, value] of Object.entries(env)) {
     if (!key.endsWith('BASE_URL')) continue
-    let url: URL
-    try {
-      url = new URL(value)
-    } catch {
-      continue
-    }
-    const host = url.hostname
-    if (host !== '127.0.0.1' && host !== 'localhost' && host !== '[::1]' && host !== '::1') continue
-    const port = url.port === '' ? (url.protocol === 'https:' ? 443 : 80) : Number(url.port)
-    if (!Number.isInteger(port) || port <= 0) continue
-    return { host: host === '[::1]' ? '::1' : host, port, origin: `${url.protocol}//${url.host}` }
+    const backend = loopbackOf(value)
+    if (backend === undefined) continue
+    return backend
   }
   return undefined
+}
+
+/**
+ * Read a loopback backend out of one configured URL.
+ * @param value - the URL as written.
+ * @returns the backend to probe, or undefined when it is not a loopback address.
+ */
+function loopbackOf(value: string): SeatBackend | undefined {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return undefined
+  }
+  const host = url.hostname
+  if (host !== '127.0.0.1' && host !== 'localhost' && host !== '[::1]' && host !== '::1') return undefined
+  const port = url.port === '' ? (url.protocol === 'https:' ? 443 : 80) : Number(url.port)
+  if (!Number.isInteger(port) || port <= 0) return undefined
+  return { host: host === '[::1]' ? '::1' : host, port, origin: `${url.protocol}//${url.host}` }
 }
 
 /**

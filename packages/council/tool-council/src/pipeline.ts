@@ -142,6 +142,16 @@ export interface PipelineState {
   readonly stages?: readonly PipelineStage[] | undefined
   /** The approach the council agreed, carried into every stage after it. */
   readonly plan?: string | undefined
+  /**
+   * Seat whose plan won the vote, carried into every stage after it.
+   *
+   * The approach alone says what to do; this says who worked it out. A later
+   * stage that has to pick a seat for a job — writing the decomposition, above
+   * all — should route on what the run earned rather than on a configured
+   * preference, and that is only possible if the winner survives the stage
+   * boundary the way the approach does.
+   */
+  readonly winner?: string | undefined
   /** The approved graph, stored verbatim so it is never re-planned. */
   readonly tasks?: readonly SubTask[] | undefined
   /** Sandboxed versions the proposing stage wrote, carried into the swarm. */
@@ -159,6 +169,8 @@ export interface StageInput {
   readonly query: string
   /** The council's agreed approach; absent at stage one. */
   readonly plan?: string | undefined
+  /** The seat whose plan won; absent at stage one, or when no vote settled. */
+  readonly winner?: string | undefined
   /** The approved graph; present for the swarm stage once approved. */
   readonly tasks?: readonly SubTask[] | undefined
   /** The sandboxed versions; present once a proposing stage has run. */
@@ -179,6 +191,8 @@ export interface StageOutput {
   readonly problems?: readonly string[] | undefined
   /** The approach, when the council stage produced one. */
   readonly plan?: string | undefined
+  /** The winning seat, when the council stage's vote settled on one. */
+  readonly winner?: string | undefined
   /** The graph, when the swarm stage produced or ran one. */
   readonly tasks?: readonly SubTask[] | undefined
   /** The sandboxed versions, when the proposing stage wrote any. */
@@ -335,6 +349,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   const output = await options.runStage(resumed.stage, {
     query: resumed.query,
     ...(resumed.plan === undefined ? {} : { plan: resumed.plan }),
+    ...(resumed.winner === undefined ? {} : { winner: resumed.winner }),
     ...(resumed.tasks === undefined ? {} : { tasks: resumed.tasks }),
     ...(resumed.candidates === undefined ? {} : { candidates: resumed.candidates }),
     ...(resumed.units === undefined ? {} : { units: resumed.units }),
@@ -348,6 +363,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
       // Whatever the stage did manage to produce is kept, so a resumed run
       // does not redo the units — or the candidates — that already landed.
       ...(output.plan === undefined ? {} : { plan: output.plan }),
+      ...(output.winner === undefined ? {} : { winner: output.winner }),
       ...(output.tasks === undefined ? {} : { tasks: output.tasks }),
       ...(output.candidates === undefined ? {} : { candidates: output.candidates }),
       ...(output.units === undefined ? {} : { units: output.units }),
@@ -376,6 +392,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     const waiting: PipelineState = {
       ...resumed,
       ...(output.plan === undefined ? {} : { plan: output.plan }),
+      ...(output.winner === undefined ? {} : { winner: output.winner }),
       ...(output.tasks === undefined ? {} : { tasks: output.tasks }),
     }
     return {
@@ -395,6 +412,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     stage: after ?? resumed.stage,
     records,
     ...(output.plan === undefined ? {} : { plan: output.plan }),
+    ...(output.winner === undefined ? {} : { winner: output.winner }),
     ...(output.tasks === undefined ? {} : { tasks: output.tasks }),
     ...(output.candidates === undefined ? {} : { candidates: output.candidates }),
     ...(output.units === undefined ? {} : { units: output.units }),

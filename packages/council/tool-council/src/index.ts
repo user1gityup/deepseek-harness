@@ -37,7 +37,7 @@ import type { PipelineStage, PipelineState } from './pipeline.ts'
 import { amendCouncil, runCouncil } from './council.ts'
 import { runSwarm } from './swarm.ts'
 import { diskSeam, parseRoots } from './files.ts'
-import { diskWriteSeam } from './writes.ts'
+import { registerStaging, sandboxWriteSeam } from './staging.ts'
 import { runPropose } from './propose.ts'
 import type { SubTask } from './decompose.ts'
 import { renderMarkdown } from './markdown.ts'
@@ -94,14 +94,28 @@ export interface SeatOverride {
   args?: string[]
   /** OpenRouter seats: model identifier to request. */
   model?: string
+  /**
+   * OpenRouter seats: chat-completions endpoint, overriding OpenRouter's own.
+   * Set this to route a seat through a local OpenAI-compatible proxy.
+   */
+  baseUrl?: string
+  /** Mark this seat as costing nothing per token. */
+  free?: boolean
 }
 
-/** A seat the user adds beyond the four shipped ones. */
+/** A seat the user adds beyond the shipped ones. */
 export interface ExtraSeat {
   /** Display name shown in the report; the key is used when omitted. */
   name?: string
   /** OpenRouter model identifier. Extra seats are OpenRouter-only. */
   model: string
+  /**
+   * Chat-completions endpoint, overriding OpenRouter's own. An extra seat
+   * pointed at a local proxy needs no API key, because the proxy holds one.
+   */
+  baseUrl?: string
+  /** This seat costs nothing per token; keeps it out of the metered blend. */
+  free?: boolean
   /** Turn this seat off without removing it. Defaults to on. */
   enabled?: boolean
 }
@@ -229,6 +243,8 @@ export interface Config {
   pipelineStages?: string
   /** The approach the council agreed, carried into the decomposition. */
   pipelinePlan?: string
+  /** Seat whose plan won the vote, so later stages can route on what the run earned. */
+  pipelineWinner?: string
   /** The approved graph, as JSON, so a resumed run needs no new planning call. */
   pipelineTasks?: string
   /** What the workers reported, as JSON, carried into the review. */
@@ -357,6 +373,8 @@ export const Config: z<Config> = z.object({
   extraSeats: z.dict(z.object({
     name: z.string(),
     model: z.string().required(),
+    baseUrl: z.string(),
+    free: z.boolean(),
     enabled: z.boolean().default(true),
   })).default({}),
   seats: z.dict(z.object({
@@ -364,6 +382,8 @@ export const Config: z<Config> = z.object({
     command: z.string(),
     args: z.array(z.string()),
     model: z.string(),
+    baseUrl: z.string(),
+    free: z.boolean(),
   })).default({}),
   apiKeyEnv: z.string().default(DEFAULT_KEY_ENV),
   timeoutMs: z.natural().default(180_000),
@@ -397,6 +417,7 @@ export const Config: z<Config> = z.object({
   pipelineStage: z.string(),
   pipelineStages: z.string(),
   pipelinePlan: z.string(),
+  pipelineWinner: z.string(),
   pipelineTasks: z.string(),
   pipelineUnits: z.string(),
   pipelineCandidates: z.string(),
@@ -571,6 +592,10 @@ export function resolveSeats(
       // toggled in the UI would spawn its command with no prompt at all.
       args: override.args !== undefined && override.args.length > 0 ? override.args : seat.args,
       model: override.model ?? seat.model,
+      // Same reasoning as `args`: an empty string is the schema's materialised
+      // default, not a request to call the empty URL.
+      baseUrl: override.baseUrl !== undefined && override.baseUrl !== '' ? override.baseUrl : seat.baseUrl,
+      free: override.free ?? seat.free,
     }
   })
   // An extra seat may not shadow a shipped id: the report keys colour and vote
@@ -585,6 +610,8 @@ export function resolveSeats(
       name: extra.name ?? id,
       transport: 'openrouter',
       model: extra.model,
+      ...extra.baseUrl === undefined || extra.baseUrl === '' ? {} : { baseUrl: extra.baseUrl },
+      ...extra.free === undefined ? {} : { free: extra.free },
       enabled: extra.enabled ?? true,
     })
   }
@@ -600,15 +627,6 @@ export function resolveSeats(
 function defaultDigestPath(): string {
   const home = process.env['DSH_HOME']
   return join(home !== undefined && home !== '' ? home : join(homedir(), '.dsh'), 'memory', 'digest.md')
-}
-
-/**
- * Where seat trees are created when no root is configured.
- * @returns the default work root, beside the rest of the DSH state.
- */
-function defaultWorkRoot(): string {
-  const home = process.env['DSH_HOME']
-  return join(home !== undefined && home !== '' ? home : join(homedir(), '.dsh'), 'swarm-work')
 }
 
 /**
@@ -654,6 +672,19 @@ export function apply(ctx: Context, config: Config = {}): void {
     return resolveSeats(now.seats, now.extraSeats)
   }
   const seats = currentSeats()
+  ctx.inject(['fs', 'sandboxPolicy'], registerStaging)
+  const proposalWorkspace = (approved: boolean) => {
+    const session = ctx.agents.requireInitiator().session
+    const policy = ctx.get('sandboxPolicy')
+    const fs = ctx.get('fs')
+    if (policy === undefined || fs === undefined) throw new Error('Proposal staging requires the DSH filesystem sandbox.')
+    const access = policy.resolve({ session })
+    if (approved && access.mode !== 'workspace-write') throw new Error('Approve workspace-write in this session and send exactly go before running a proposing round.')
+    return {
+      workRoot: join(access.workspaceRoot, '.dsh-staging'),
+      writes: sandboxWriteSeam(fs, policy, session),
+    }
+  }
 
   // Council mode is enforced per step, not through the system prompt. A prompt
   // section sits far from the user's message and competes with everything else
@@ -1404,6 +1435,9 @@ export function apply(ctx: Context, config: Config = {}): void {
           ...(settingsNow.pipelinePlan === undefined || settingsNow.pipelinePlan === ''
             ? {}
             : { plan: settingsNow.pipelinePlan }),
+          ...(settingsNow.pipelineWinner === undefined || settingsNow.pipelineWinner === ''
+            ? {}
+            : { winner: settingsNow.pipelineWinner }),
           ...(storedTasks === undefined ? {} : { tasks: storedTasks }),
           ...(storedCandidates === undefined ? {} : { candidates: storedCandidates }),
           ...(heldAt === 0
@@ -1489,6 +1523,7 @@ export function apply(ctx: Context, config: Config = {}): void {
               files: diskSeam(),
               fileRoots: parseRoots(config.fileRoots),
               ...(config.plannerSeat === undefined ? {} : { planner: config.plannerSeat }),
+              ...(input.winner === undefined ? {} : { winner: input.winner }),
               ...(input.tasks === undefined || !approved ? {} : { tasks: input.tasks }),
             })
             if (swarm.phase === 'plan' && settingsNow.autoApprove !== true) {
@@ -1546,10 +1581,9 @@ export function apply(ctx: Context, config: Config = {}): void {
                 : `${input.query}${String.fromCharCode(10)}${String.fromCharCode(10)}AGREED APPROACH (from the council):${String.fromCharCode(10)}${input.plan}`,
               seats: seatsNow,
               fileRoots: parseRoots(config.fileRoots),
-              workRoot: config.workRoot === undefined || config.workRoot === '' ? defaultWorkRoot() : config.workRoot,
+              ...proposalWorkspace(approved),
               approved,
               files: diskSeam(),
-              writes: diskWriteSeam(),
               apiKey,
               signal: exec.signal,
               timeoutMs,
@@ -1661,6 +1695,13 @@ export function apply(ctx: Context, config: Config = {}): void {
             report: renderMarkdown(council),
             complete: council.phase === 'full',
             ...(council.plan === undefined ? {} : { plan: council.plan }),
+            // Only the deciding stage names a winner. The review stage runs the
+            // same tool and elects its own, and letting that through would
+            // overwrite the seat that actually won the approach with whichever
+            // seat wrote the best critique of the finished work.
+            ...(stage === 'review' || council.verdict.winner === undefined
+              ? {}
+              : { winner: council.verdict.winner }),
             failures: [
               ...(council.planFailures ?? []).map(failure => ({ seat: failure.seat, error: failure.error })),
               ...council.drafts
@@ -1680,6 +1721,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         pipelineStage: result.state.stage,
         pipelineStages: stagesOf(result.state).join(','),
         pipelinePlan: result.state.plan ?? '',
+        pipelineWinner: result.state.winner ?? '',
         pipelineTasks: result.state.tasks === undefined ? '' : JSON.stringify(result.state.tasks),
         pipelineUnits: result.state.units === undefined ? '' : JSON.stringify(result.state.units),
         pipelineCandidates: result.state.candidates === undefined ? '' : JSON.stringify(result.state.candidates),
@@ -1882,10 +1924,9 @@ export function apply(ctx: Context, config: Config = {}): void {
           : args.task,
         seats: currentSeats(),
         fileRoots: parseRoots(config.fileRoots),
-        workRoot: config.workRoot === undefined || config.workRoot === '' ? defaultWorkRoot() : config.workRoot,
+        ...proposalWorkspace(approved),
         approved,
         files: diskSeam(),
-        writes: diskWriteSeam(),
         apiKey,
         signal: exec.signal,
         timeoutMs,

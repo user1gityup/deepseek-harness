@@ -66,6 +66,16 @@ export interface SwarmRunOptions {
   /** Seat id that should write the decomposition. */
   readonly planner?: string | undefined
   /**
+   * Seat whose plan won the council vote, when this run follows one.
+   *
+   * Routing that a user configures is an opinion; routing derived from this is
+   * earned by the run itself, which is why the winner is carried here rather
+   * than inferred from the roster. It selects the planner when no planner is
+   * configured outright, so the seat that argued for the approach is the one
+   * that splits it up.
+   */
+  readonly winner?: string | undefined
+  /**
    * The graph to run, when one was already approved.
    *
    * An approved run MUST NOT decompose again. Re-planning would produce a
@@ -337,6 +347,7 @@ export async function runSwarm(options: SwarmRunOptions): Promise<SwarmResult> {
   const planner = choosePlanner(
     workerSeats.map(seat => ({ ...seat, enabled: true })),
     options.planner,
+    options.winner,
   )
   if (planner === undefined && options.tasks === undefined) {
     return {

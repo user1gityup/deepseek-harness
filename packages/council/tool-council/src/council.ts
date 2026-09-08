@@ -302,21 +302,35 @@ ${query}`
 /**
  * Choose which seat writes the plan.
  *
- * Preference order: an explicitly configured planner, then the first enabled
- * OpenRouter seat (a metered call whose cost is known), then the first enabled
- * seat of any kind. A CLI seat is the last resort because its cost is opaque.
+ * Preference order: an explicitly configured planner, then the seat whose plan
+ * won the vote, then the first enabled OpenRouter seat (a metered call whose
+ * cost is known), then the first enabled seat of any kind.
+ *
+ * The winner outranks the cost-transparency preference because the two are
+ * answering different questions. Reaching for the seat with the clearest price
+ * is the right default when nobody has been chosen; once a council has settled
+ * on a plan, the seat that wrote it holds the reasoning behind it, and handing
+ * the decomposition to a different seat means re-deriving that reasoning from
+ * prose — the cheapest call producing the most expensive graph. A configured
+ * planner still wins, because that is the user saying so outright.
  * @param seats - the active roster.
  * @param preferred - explicitly configured planner seat id.
+ * @param winner - seat whose plan the council voted for, when one won.
  * @returns the planning seat, or undefined when the roster is empty.
  */
 export function choosePlanner(
   seats: readonly SeatConfig[],
   preferred: string | undefined,
+  winner?: string,
 ): SeatConfig | undefined {
   const enabled = seats.filter(seat => seat.enabled)
   if (preferred !== undefined) {
     const named = enabled.find(seat => seat.id === preferred)
     if (named !== undefined) return named
+  }
+  if (winner !== undefined) {
+    const won = enabled.find(seat => seat.id === winner)
+    if (won !== undefined) return won
   }
   return enabled.find(seat => seat.transport === 'openrouter') ?? enabled[0]
 }
@@ -330,14 +344,16 @@ export function choosePlanner(
  * transient failure on the cheapest seat fall through to the next one.
  * @param seats - the active roster.
  * @param preferred - explicitly configured planner seat id.
+ * @param winner - seat whose plan the council voted for, when one won.
  * @returns candidate planners in the order they should be tried.
  */
 export function plannerOrder(
   seats: readonly SeatConfig[],
   preferred: string | undefined,
+  winner?: string,
 ): readonly SeatConfig[] {
   const enabled = seats.filter(seat => seat.enabled)
-  const first = choosePlanner(enabled, preferred)
+  const first = choosePlanner(enabled, preferred, winner)
   if (first === undefined) return []
   return [first, ...enabled.filter(seat => seat.id !== first.id)]
 }

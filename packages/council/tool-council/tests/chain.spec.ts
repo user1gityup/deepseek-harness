@@ -165,6 +165,24 @@ describe('runPipeline', () => {
     expect(stage.seen[1]?.input).toMatchObject({ plan: 'use the cache' })
   })
 
+  it('carries the winning seat into the decomposition alongside the approach', async () => {
+    // The approach says what to do; the winner says who worked it out. Routing
+    // earned by the run is only possible if the second survives the stage
+    // boundary the way the first does.
+    const stage = runner({ council: { report: 'agreed', complete: true, plan: 'use the cache', winner: 'claude' } })
+    const after = await runPipeline({ state: startPipeline('p1', 'q'), runStage: stage.runStage, now: NOW })
+    expect(after.state.winner).toBe('claude')
+    await runPipeline({ state: after.state, runStage: stage.runStage, now: NOW })
+    expect(stage.seen[1]?.input).toMatchObject({ winner: 'claude' })
+  })
+
+  it('keeps the winner while a stage waits at its own gate', async () => {
+    const stage = runner({ council: { report: 'waiting', complete: false, plan: 'p', winner: 'claude' } })
+    const out = await runPipeline({ state: startPipeline('p1', 'q'), runStage: stage.runStage, now: NOW })
+    expect(out.state.stage).toBe('council')
+    expect(out.state.winner).toBe('claude')
+  })
+
   it('stops where a stage stopped at its own gate, without advancing', async () => {
     const stage = runner({ council: { report: 'waiting for approval', complete: false } })
     const out = await runPipeline({ state: startPipeline('p1', 'q'), runStage: stage.runStage, now: NOW })

@@ -21,6 +21,13 @@ const METERED: Worker = {
   provider: 'spawn', name: 'Metered', enabled: true,
   costClass: 'metered', kinds: ['any'],
 }
+// Named to sort AFTER `claude-code` alphabetically on purpose: while free and
+// subscription shared one cost class the tie fell through to the provider name,
+// so a free worker named later than the paid one silently never got the work.
+const FREE: Worker = {
+  provider: 'free-claude', name: 'Free Claude', enabled: true,
+  costClass: 'free', kinds: ['code', 'tests', 'any'],
+}
 
 describe('inferKind', () => {
   it('reads implementation work as code', () => {
@@ -43,7 +50,35 @@ describe('assignWorkers', () => {
     // already paid for.
     const plan = assignWorkers([task('a', 'Implement a feature')], [METERED, CLAUDE])
     expect(plan.assignments[0]?.provider).toBe('claude-code')
-    expect(plan.assignments[0]?.reason).toContain('subscription')
+    expect(plan.assignments[0]?.reason).toContain('no free worker')
+  })
+
+  it('prefers a free worker over a subscription one', () => {
+    // The subscription bills nothing per token but its quota is finite, and
+    // that quota is what a monthly budget runs out of. A free worker spends
+    // neither, so it takes the work and the subscription is held in reserve.
+    const plan = assignWorkers([task('a', 'Implement a feature')], [CLAUDE, FREE])
+    expect(plan.assignments[0]?.provider).toBe('free-claude')
+    expect(plan.assignments[0]?.reason).toContain('free worker')
+  })
+
+  it('falls back to the subscription when every free worker is full', () => {
+    const capped: Worker = { ...FREE, maxConcurrent: 1 }
+    const tasks = ['a', 'b'].map(id => task(id, 'Implement something'))
+    const plan = assignWorkers(tasks, [CLAUDE, capped])
+    expect(plan.load.get('free-claude')).toBe(1)
+    expect(plan.load.get('claude-code')).toBe(1)
+  })
+
+  it('keeps the cost order intact across all three classes', () => {
+    const tasks = ['a', 'b', 'c'].map(id => task(id, 'Implement something'))
+    const plan = assignWorkers(tasks, [
+      METERED,
+      { ...CLAUDE, maxConcurrent: 1 },
+      { ...FREE, maxConcurrent: 1 },
+    ])
+    expect(plan.assignments.map(entry => entry.provider))
+      .toEqual(['free-claude', 'claude-code', 'spawn'])
   })
 
   it('never assigns a disabled worker', () => {
@@ -114,7 +149,7 @@ describe('defaultRoster', () => {
 describe('seatRoster', () => {
   const seats: readonly SeatConfig[] = [
     { id: 'claude', name: 'Claude', transport: 'cli', enabled: true },
-    { id: 'free-claude', name: 'Free Claude', transport: 'cli', enabled: false },
+    { id: 'free-claude', name: 'Free Claude', transport: 'cli', free: true, enabled: false },
     { id: 'kimi', name: 'Kimi', transport: 'openrouter', model: 'moonshotai/kimi-k2', enabled: true },
   ]
 
@@ -125,7 +160,15 @@ describe('seatRoster', () => {
 
   it('prices a CLI seat as included and an OpenRouter seat as metered', () => {
     const roster = seatRoster(seats)
-    expect(roster.map(worker => worker.costClass)).toEqual(['included', 'included', 'metered'])
+    expect(roster.map(worker => worker.costClass)).toEqual(['included', 'free', 'metered'])
+  })
+
+  it('reads a free CLI seat by its own flag, not by its transport', () => {
+    // `free-claude` runs the same binary as `claude` over the same transport;
+    // only the flag separates a local proxy from the paid subscription.
+    const roster = seatRoster(seats)
+    expect(roster.find(worker => worker.provider === 'claude')?.costClass).toBe('included')
+    expect(roster.find(worker => worker.provider === 'free-claude')?.costClass).toBe('free')
   })
 
   it('starts a seat in the swarm the way it starts on the council', () => {

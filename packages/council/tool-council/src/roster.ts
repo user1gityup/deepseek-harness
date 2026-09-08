@@ -104,22 +104,44 @@ function accepts(worker: Worker, kind: WorkKind): boolean {
 }
 
 /**
+ * A preference for one unit kind, earned by this run rather than configured.
+ *
+ * Kept separate from `Worker.kinds`: the roster's kinds are a user or
+ * default setting that outlasts the run, while an earned preference is
+ * evidence from THIS run — a plan vote, a code sample the user picked — and
+ * applies only to it. Neither is an opinion this module holds about which
+ * model is better at what.
+ */
+export interface EarnedPreference {
+  /** Skip cost entirely when ranking candidates; fit and load decide alone. */
+  readonly ignoreCost?: boolean | undefined
+  /** Kind to the provider that earned first refusal on it this run. */
+  readonly specialists?: ReadonlyMap<WorkKind, string> | undefined
+}
+
+/**
  * Assign every unit of a decomposition to a worker.
  *
  * Order of preference, strongest first:
  *  1. A provider the decomposition named explicitly, if that worker is enabled.
- *  2. A worker declaring this kind of work, cheapest cost class first.
- *  3. Any enabled worker accepting `any`, cheapest cost class first.
+ *  2. The provider that earned this kind this run (`earned.specialists`), if
+ *     it accepts the kind and has room.
+ *  3. A worker declaring this kind of work, cheapest cost class first unless
+ *     `earned.ignoreCost` is set.
+ *  4. Any enabled worker accepting `any`, ranked the same way.
  *
- * Within a cost class, the least-loaded worker wins, so one subscription is
- * not drained while another sits idle.
+ * Within a cost class (or, with cost ignored, across the whole tier), the
+ * least-loaded worker wins, so one subscription is not drained while another
+ * sits idle.
  * @param tasks - the decomposition.
  * @param roster - configured workers.
+ * @param earned - this run's own signals for preferring a worker, if any.
  * @returns the assignment plan.
  */
 export function assignWorkers(
   tasks: readonly SubTask[],
   roster: readonly Worker[],
+  earned?: EarnedPreference,
 ): AssignmentPlan {
   const enabled = roster.filter(worker => worker.enabled)
   const load = new Map<string, number>()
@@ -130,10 +152,10 @@ export function assignWorkers(
   const hasRoom = (worker: Worker): boolean =>
     worker.maxConcurrent === undefined || held(worker) < worker.maxConcurrent
 
-  /** Cheapest cost class first, then least loaded, then stable by name. */
+  /** Cheapest cost class first unless told to skip it, then least loaded, then stable by name. */
   const best = (candidates: readonly Worker[]): Worker | undefined =>
     [...candidates].sort((a, b) =>
-      COST_ORDER[a.costClass] - COST_ORDER[b.costClass]
+      (earned?.ignoreCost === true ? 0 : COST_ORDER[a.costClass] - COST_ORDER[b.costClass])
       || held(a) - held(b)
       || a.provider.localeCompare(b.provider),
     )[0]
@@ -146,10 +168,14 @@ export function assignWorkers(
     const named = task.provider === undefined
       ? undefined
       : enabled.find(worker => worker.provider === task.provider && hasRoom(worker))
+    const specialist = named !== undefined ? undefined : earned?.specialists?.get(kind)
+    const earnedWorker = specialist === undefined
+      ? undefined
+      : enabled.find(worker => worker.provider === specialist && accepts(worker, kind) && hasRoom(worker))
     const matching = enabled.filter(worker => accepts(worker, kind) && hasRoom(worker))
     const anyone = enabled.filter(worker => accepts(worker, 'any') && hasRoom(worker))
 
-    const chosen = named ?? best(matching) ?? best(anyone)
+    const chosen = named ?? earnedWorker ?? best(matching) ?? best(anyone)
     if (chosen === undefined) {
       unassigned.push(task.id)
       assignments.push({ task, reason: 'no enabled worker could take it' })
@@ -159,11 +185,15 @@ export function assignWorkers(
     load.set(chosen.provider, held(chosen) + 1)
     const reason = named !== undefined
       ? 'named by the decomposition'
-      : chosen.costClass === 'free'
-        ? `${kind} on a free worker`
-        : chosen.costClass === 'included'
-          ? `${kind}; no free worker was available`
-          : `${kind}; no free or subscription worker was available`
+      : chosen === earnedWorker
+        ? `${kind}; earned this run`
+        : earned?.ignoreCost === true
+          ? `${kind}; least-loaded paid worker`
+          : chosen.costClass === 'free'
+            ? `${kind} on a free worker`
+            : chosen.costClass === 'included'
+              ? `${kind}; no free worker was available`
+              : `${kind}; no free or subscription worker was available`
     assignments.push({ task, provider: chosen.provider, reason })
   }
 

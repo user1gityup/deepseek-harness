@@ -38,6 +38,19 @@ describe('swarm profiles', () => {
     expect(result.results[0]?.seat).toBe('paid')
     expect(vi.mocked(askSeat).mock.calls.every(call => call[0].id === 'paid')).toBe(true)
   })
+  it('fastest earns the code unit for the plan-vote winner over cost order', async () => {
+    // claude is the cheaper subscription seat and kimi is metered, so cost
+    // order alone would pick claude; kimi earned the code unit instead by
+    // winning the plan vote, which is the only reason it should win here.
+    const twoPaid: SeatConfig[] = [
+      { id: 'claude', name: 'claude', enabled: true, transport: 'cli' },
+      { id: 'kimi', name: 'kimi', enabled: true, transport: 'openrouter' },
+    ]
+    vi.mocked(askSeat).mockImplementation(async (seat, prompt) => ({ seat: seat.id, ms: 1, text: prompt.startsWith('Review this unit') ? 'ACCEPT: yes' : '4' }))
+    const codeTask = { id: 'code-unit', title: 'implement the parser', detail: '', dependsOn: [] }
+    const result = await runSwarm({ ...base, seats: twoPaid, profile: 'fastest', winner: 'kimi', tasks: [codeTask] })
+    expect(result.results[0]?.seat).toBe('kimi')
+  })
   it('refuses economy without free competitors or a paid reviewer before spending', async () => {
     expect((await runSwarm({ ...base, seats: seats.slice(0, 2) })).phase).toBe('blocked')
     expect((await runSwarm({ ...base, seats: seats.slice(1) })).phase).toBe('blocked')

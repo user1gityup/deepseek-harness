@@ -24,7 +24,7 @@
 
 import type { SubTask } from './decompose.ts'
 import { directDecomposePrompt, executionWaves, parseDecomposition, validateGraph } from './decompose.ts'
-import type { Assignment, Worker } from './roster.ts'
+import type { Assignment, EarnedPreference, WorkKind, Worker } from './roster.ts'
 import { assignWorkers, seatRoster, inferKind } from './roster.ts'
 import type { ExecutionEstimate, ProviderCost } from './execution-cost.ts'
 import { estimateExecution, renderExecutionEstimate } from './execution-cost.ts'
@@ -78,7 +78,8 @@ export interface SwarmRunOptions {
    * earned by the run itself, which is why the winner is carried here rather
    * than inferred from the roster. It selects the planner when no planner is
    * configured outright, so the seat that argued for the approach is the one
-   * that splits it up.
+   * that splits it up. In the `fastest` profile it also earns first refusal on
+   * `code` units during assignment, ahead of load balancing.
    */
   readonly winner?: string | undefined
   /**
@@ -404,7 +405,19 @@ export async function runSwarm(options: SwarmRunOptions): Promise<SwarmResult> {
     const picked = options.picked?.split(',').find(id => roster.some(worker => worker.enabled && worker.provider === id && (worker.kinds.includes('any') || worker.kinds.includes(inferKind(task)))))
     return task.tier === 'ui' && picked !== undefined ? { ...task, provider: picked } : task
   })
-  const plan = assignWorkers(routed, roster)
+  // Fastest ignores cost outright — every remaining seat is already paid for,
+  // so ranking them by cost class would just reintroduce the subscription
+  // preference this profile exists to avoid. The one preference it keeps is
+  // earned by the run itself: the seat whose approach won the plan vote is
+  // the one that best understands what the code units are actually building,
+  // never a static opinion about which model is better at code.
+  const specialists: ReadonlyMap<WorkKind, string> | undefined = options.profile === 'fastest' && options.winner !== undefined
+    ? new Map([['code', options.winner]])
+    : undefined
+  const earned: EarnedPreference | undefined = options.profile === 'fastest'
+    ? { ignoreCost: true, specialists }
+    : undefined
+  const plan = assignWorkers(routed, roster, earned)
   const costTasks = plan.assignments.flatMap((entry) => {
     if (options.profile === undefined) return [{ ...entry.task, provider: entry.provider }]
     const matching = fullRoster.filter(worker => worker.enabled && (worker.kinds.includes('any') || worker.kinds.includes(inferKind(entry.task))))

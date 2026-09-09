@@ -116,7 +116,8 @@
     "open": "^11.0.0",
     "@deepseek-ai/dsh-client-ui-claude-quota": "workspace:^",
     "@deepseek-ai/dsh-client-ui-codex-quota": "workspace:^",
-    "@deepseek-ai/dsh-client-ui-council-budget": "workspace:^"
+    "@deepseek-ai/dsh-client-ui-council-budget": "workspace:^",
+    "@deepseek-ai/dsh-client-ui-antigravity-quota": "workspace:^"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis-plugin-loader": "workspace:^",

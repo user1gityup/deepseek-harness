@@ -83,6 +83,7 @@
     { "path": "./packages/client/ui-model-selection" },
     { "path": "./packages/client/ui-openrouter-monitor" },
     { "path": "./packages/client/ui-claude-quota" },
+    { "path": "./packages/client/ui-antigravity-quota" },
     { "path": "./packages/client/ui-codex-quota" },
     { "path": "./packages/client/ui-council-budget" },
     { "path": "./packages/client/ui-agent-preset" },

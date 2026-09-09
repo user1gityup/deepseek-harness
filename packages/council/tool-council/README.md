@@ -8,6 +8,14 @@ After the human selects workspace-write in the session permission control and se
 
 Proposal rounds also use the DSH filesystem sandbox and .dsh-staging, separated by run and seat. The legacy workRoot setting cannot redirect writes outside the workspace. Local CLI permissions and launch arguments are unchanged; API agents can stage work while those seats are unavailable.
 
+## Antigravity seats
+
+Install the driver with `node scripts/install-agy-headless.mjs` from the checkout. The `agy-flash-lite`, `agy-flash` and `agy-pro` seats require the signed-in Antigravity IDE and ship disabled. They use Gemini tiers sharing one quota pool. The installer also creates `~/.dsh/bin/agy.cmd` for standalone use.
+
+The default `--tools shared` policy instructs Antigravity to read the user's `~/.claude/CLAUDE.md` and shared memory index/log, and permits native tools within the authorized task. Native IDE approvals remain authoritative. Council rounds return proposals; candidate writes retain DSH's approval and staging requirements. Shared policy does not install a sandbox or copy credentials. Optional `web` and `read` modes detect disallowed calls after execution and cannot undo them.
+
+Research queries rotate across enabled free seats that have native web tools, including Free Claude and Antigravity. Failed searches fall back to the host web provider. Shared results reach all drafting seats; metered OpenRouter search remains opt-in.
+
 ## Model Experience
 
 `council.swarmProfile` selects `economy` or `fastest` in the roster. Economy contests every unit with at least two eligible free seats and requires paid review. Escalation allows one paid candidate and at most two paid reviews per unit. Fastest uses one paid worker per unit across parallel dependency waves. Both respect worker kinds; reviewers need review capability. UI units prefer an eligible selected sample author. No profile preserves existing routing.
@@ -23,3 +31,5 @@ The tool schema explains staging and its approval requirement. Results identify 
 ## Known Limitations and Deferred Work
 
 Staging does not execute, commit, queue pushes or retry unavailable seats. A new session requires new approval and go. This does not sandbox local CLI seats or strengthen Windows process confinement.
+
+Antigravity reads the shared instructions through its native tools, adding startup latency and context. Its driver prepends the operating rules and optional memory digest. Prompts exceeding 30,000 characters fail because the underlying client accepts argv only. Live server discovery requires Windows process-query access.

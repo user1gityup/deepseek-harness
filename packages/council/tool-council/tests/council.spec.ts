@@ -190,7 +190,7 @@ describe('executable candidates', () => {
 
 describe('seat resolution', () => {
   it('returns shipped defaults when nothing is overridden', () => {
-    expect(resolveSeats().map(seat => seat.id)).toEqual(['claude', 'free-claude', 'openai', 'kimi', 'deepseek', 'openrouter-free'])
+    expect(resolveSeats().map(seat => seat.id)).toEqual(['claude', 'free-claude', 'openai', 'kimi', 'deepseek', 'openrouter-free', 'agy-flash-lite', 'agy-flash', 'agy-pro'])
   })
 
   it('applies a model override without touching other seats', () => {
@@ -244,7 +244,7 @@ describe('report rendering', () => {
 describe('extra seats', () => {
   it('appends a configured OpenRouter seat after the shipped ones', () => {
     const seats = resolveSeats({}, { grok: { model: 'x-ai/grok-4', name: 'Grok' } })
-    expect(seats.map(seat => seat.id)).toEqual(['claude', 'free-claude', 'openai', 'kimi', 'deepseek', 'openrouter-free', 'grok'])
+    expect(seats.map(seat => seat.id)).toEqual(['claude', 'free-claude', 'openai', 'kimi', 'deepseek', 'openrouter-free', 'agy-flash-lite', 'agy-flash', 'agy-pro', 'grok'])
     const grok = seats.find(seat => seat.id === 'grok')
     expect(grok?.transport).toBe('openrouter')
     expect(grok?.model).toBe('x-ai/grok-4')

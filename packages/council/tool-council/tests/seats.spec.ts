@@ -49,6 +49,11 @@ async function invoke(seat: SeatConfig, prompt: string): Promise<{ args: string[
 const HUGE = 'x'.repeat(120_000)
 
 describe('askCliSeat prompt delivery', () => {
+  it('delivers short prompts on stdin when the seat requires it', async () => {
+    const seen = await invoke(reporterSeat({ promptOnStdin: true }), 'short prompt')
+    expect(seen).toEqual({ args: ['flag'], stdin: 'short prompt' })
+  })
+
   it('passes a normal prompt as argv and leaves stdin closed', async () => {
     const seen = await invoke(reporterSeat(), 'a short question')
     expect(seen.args).toEqual(['flag', 'a short question'])

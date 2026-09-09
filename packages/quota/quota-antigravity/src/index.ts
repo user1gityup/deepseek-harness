@@ -1,21 +1,21 @@
-/** Publish Codex subscription allowance to the browser settings mirror. */
+/** Publish Antigravity subscription allowance to the browser settings mirror. */
 import type { Context } from '@deepseek-ai/cordis'
 import { settingsNamespace, type SettingsScope } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
-import { codexBinary, readQuota } from './reading.ts'
+import { readQuota } from './reading.ts'
 
 /** Cordis plugin identifier. */
-export const name = 'quota-codex'
+export const name = 'quota-antigravity'
 /** Required settings provider. */
 export const inject = ['settings']
 /** Namespace mirrored by the sidebar panel. */
-export const CODEX_QUOTA_NAMESPACE = settingsNamespace('codex-quota')
+export const ANTIGRAVITY_QUOTA_NAMESPACE = settingsNamespace('antigravity-quota')
 /** Flat settings avoid nested Schemastery defaults. */
 export interface Config {
   /** Register and refresh when enabled. */
   enabled?: boolean
-  /** Executable override; empty resolves Codex on PATH. */
-  executable?: string
+  /** Loopback endpoint override; empty discovers the running language server. */
+  endpoint?: string
   /** Poll period in milliseconds; zero disables automatic polling after boot. */
   refreshIntervalMs?: number
   /** Deadline for a single read in milliseconds. */
@@ -31,7 +31,7 @@ export interface Config {
 }
 /** Loader configuration and published state. */
 export const Config: z<Config> = z.object({
-  enabled: z.boolean().default(true), executable: z.string().default(''),
+  enabled: z.boolean().default(true), endpoint: z.string().default(''),
   refreshIntervalMs: z.natural().default(300_000), timeoutMs: z.number().min(1000).default(20_000),
   bucketsJson: z.string().default('[]'), capturedAt: z.number().default(0),
   refreshRequestedAt: z.number().default(0), refreshState: z.string().default('idle'),
@@ -44,7 +44,7 @@ export const Config: z<Config> = z.object({
 export function apply(ctx: Context, config: Config): void {
   if (config.enabled === false) return
   const scope = ctx.settings.register(
-    CODEX_QUOTA_NAMESPACE,
+    ANTIGRAVITY_QUOTA_NAMESPACE,
     Config as never,
     { base: config as never },
   ) as SettingsScope<Config> | undefined
@@ -70,15 +70,15 @@ export function apply(ctx: Context, config: Config): void {
       }
       pending = (async () => {
         try {
-          await ctx.settings.update(CODEX_QUOTA_NAMESPACE, { refreshState: 'running' })
-          const buckets = await readQuota(config.executable || codexBinary(), config.timeoutMs ?? 20_000, controller.signal)
-          if (!controller.signal.aborted) await ctx.settings.update(CODEX_QUOTA_NAMESPACE, {
+          await ctx.settings.update(ANTIGRAVITY_QUOTA_NAMESPACE, { refreshState: 'running' })
+          const buckets = await readQuota(config.endpoint ?? '', config.timeoutMs ?? 20_000, controller.signal)
+          if (!controller.signal.aborted) await ctx.settings.update(ANTIGRAVITY_QUOTA_NAMESPACE, {
             bucketsJson: JSON.stringify(buckets), capturedAt: Date.now(), refreshState: 'ok',
           })
         } catch {
           // Read failures retain the last capture; no child output enters browser settings.
           if (!controller.signal.aborted) {
-            try { await ctx.settings.update(CODEX_QUOTA_NAMESPACE, { refreshState: 'failed' }) }
+            try { await ctx.settings.update(ANTIGRAVITY_QUOTA_NAMESPACE, { refreshState: 'failed' }) }
             catch { /* A read-only or disposed settings provider cannot publish status. */ }
           }
         }
@@ -117,5 +117,5 @@ export function apply(ctx: Context, config: Config): void {
       controller.abort()
       await pending
     }
-  }, 'quota-codex: reader lifecycle')
+  }, 'quota-antigravity: reader lifecycle')
 }

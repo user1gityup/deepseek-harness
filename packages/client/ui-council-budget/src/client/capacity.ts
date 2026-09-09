@@ -50,6 +50,9 @@ export const DEFAULT_SEATS: readonly PanelSeat[] = [
   // Ships disabled for the same reason Free Claude does: it needs the local
   // free-model proxy running on 127.0.0.1:8080.
   { id: 'openrouter-free', name: 'OpenRouter Free', transport: 'openrouter', model: 'proxy-auto', free: true, enabled: false },
+  { id: 'agy-flash-lite', name: 'Gemini Flash Lite (Antigravity)', transport: 'cli', free: true, enabled: false },
+  { id: 'agy-flash', name: 'Gemini Flash (Antigravity)', transport: 'cli', free: true, enabled: false },
+  { id: 'agy-pro', name: 'Gemini Pro (Antigravity)', transport: 'cli', free: true, enabled: false },
 ]
 
 /**

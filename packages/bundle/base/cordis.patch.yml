@@ -231,6 +231,8 @@
     # Publishes the Claude Code subscription quota for the browser panel.
     # Boot only reads the status line's cache file; a live `/usage` call
     # costs a request against the quota, so it waits for a button press.
+    - id: quota-antigravity
+      name: '@deepseek-ai/dsh-quota-antigravity'
     - id: quota-codex
       name: '@deepseek-ai/dsh-quota-codex'
     - id: quota-claude

@@ -124,7 +124,8 @@
     "@deepseek-ai/dsh-web": "workspace:^",
     "@deepseek-ai/dsh-web-search-cli": "workspace:^",
     "@deepseek-ai/dsh-web-search-deepseek": "workspace:^",
-    "@deepseek-ai/dsh-workflow-worker-thread": "workspace:^"
+    "@deepseek-ai/dsh-workflow-worker-thread": "workspace:^",
+    "@deepseek-ai/dsh-quota-antigravity": "workspace:^"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-invariants": "workspace:^",

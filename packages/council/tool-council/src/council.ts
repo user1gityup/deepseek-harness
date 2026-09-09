@@ -21,6 +21,7 @@ import { askSeat, probeSeat } from './seats.ts'
 import { failedSeats } from './runs.ts'
 import type { RunRecord } from './runs.ts'
 import { mergePlan } from './merge.ts'
+import { researchSeats } from './research-seats.ts'
 import type { PlanMerge } from './merge.ts'
 
 /** One seat's review of the drafts, with its vote. */
@@ -948,7 +949,9 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
   const canRead = options.files !== undefined && fileRoots.length > 0
   let researched: Awaited<ReturnType<typeof gatherRequested>>
   let fileEvidence: Awaited<ReturnType<typeof gatherFiles>>
-  const canSearch = options.seatResearch === true && options.web !== undefined
+  const researchWeb = researchSeats(active, (seat, prompt) =>
+    ask(seat, 'plan', () => askSeat(seat, prompt, options.apiKey, options.signal, options.timeoutMs, options.memory)), options.web)
+  const canSearch = options.seatResearch === true && researchWeb !== undefined
   if ((canSearch || canRead) && active.length > 0) {
     const asks = await fanOut(
       active.map(seat => () =>
@@ -961,7 +964,7 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
         .map(ask => ({ seat: ask.seat, queries: parseSearchRequests(ask.text) }))
         .filter(request => request.queries.length > 0)
       if (requests.length > 0) {
-        researched = await gatherRequested(options.web, requests, options.signal, options.researchConcurrency)
+        researched = await gatherRequested(researchWeb, requests, options.signal, options.researchConcurrency)
       }
     }
     if (canRead) {
@@ -985,7 +988,7 @@ export async function runCouncil(options: RunOptions): Promise<CouncilResult> {
   // said they needed. Fall back to the single search only when nothing was
   // asked for, or when the research round is switched off.
   const searched = researched ?? (needsTools && !online
-    ? await gatherEvidence(options.web, options.query, options.signal)
+    ? await gatherEvidence(researchWeb, options.query, options.signal)
     : undefined)
   // Files ride in the same block as the searches, so every place that already
   // hands a seat its evidence hands it the source too, with no further change.

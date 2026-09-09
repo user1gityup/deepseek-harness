@@ -52,6 +52,10 @@ export interface SeatConfig {
    * argument follows, so its entry is dropped instead.
    */
   readonly stdinPromptArg?: string | undefined
+  /** Deliver every prompt over stdin for this CLI. */
+  readonly promptOnStdin?: boolean | undefined
+  /** This seat can execute web searches with native tools. */
+  readonly nativeWebSearch?: boolean | undefined
   /**
    * For `openrouter`: how long the streamed answer may go silent before the
    * seat gives up, overriding {@link DEFAULT_STREAM_IDLE_MS}.
@@ -176,6 +180,7 @@ export const DEFAULT_SEATS: readonly SeatConfig[] = [
   },
   {
     id: 'free-claude',
+    nativeWebSearch: true,
     name: 'Free Claude',
     transport: 'cli',
     command: 'claude',
@@ -266,6 +271,45 @@ export const DEFAULT_SEATS: readonly SeatConfig[] = [
     // Off by default, for the reason `free-claude` is: it needs a local
     // process running, and a seat that fails on every run of a fresh install
     // is worse than one the user turns on.
+    enabled: false,
+  },
+  {
+    id: 'agy-flash-lite',
+    name: 'Gemini Flash Lite (Antigravity)',
+    transport: 'cli',
+    command: 'node',
+    args: [join(homedir(), '.dsh', 'bin', 'agy-headless.mjs'), '--model', 'flash_lite', '--tools', 'shared', '{prompt}'],
+    promptOnStdin: true,
+    nativeWebSearch: true,
+    contextFileFlag: '--context-file',
+    free: true,
+    timeoutMs: 420_000,
+    enabled: false,
+  },
+  {
+    id: 'agy-flash',
+    name: 'Gemini Flash (Antigravity)',
+    transport: 'cli',
+    command: 'node',
+    args: [join(homedir(), '.dsh', 'bin', 'agy-headless.mjs'), '--model', 'flash', '--tools', 'shared', '{prompt}'],
+    promptOnStdin: true,
+    nativeWebSearch: true,
+    contextFileFlag: '--context-file',
+    free: true,
+    timeoutMs: 420_000,
+    enabled: false,
+  },
+  {
+    id: 'agy-pro',
+    name: 'Gemini Pro (Antigravity)',
+    transport: 'cli',
+    command: 'node',
+    args: [join(homedir(), '.dsh', 'bin', 'agy-headless.mjs'), '--model', 'pro', '--tools', 'shared', '{prompt}'],
+    promptOnStdin: true,
+    nativeWebSearch: true,
+    contextFileFlag: '--context-file',
+    free: true,
+    timeoutMs: 420_000,
     enabled: false,
   },
 ]
@@ -569,7 +613,7 @@ export async function askCliSeat(
   // instead. Reviews are where this bites: that prompt carries every seat's
   // full draft, so the round that most needs its votes is the one that loses
   // them.
-  const overLimit = commandLineLength(command, args) > ARGV_LIMIT
+  const overLimit = seat.promptOnStdin === true || commandLineLength(command, args) > ARGV_LIMIT
   const argv = overLimit ? [...stdinArgv(template, seat.stdinPromptArg), ...tail] : args
   const input = overLimit ? prompt : undefined
   let lastError = 'not found'

@@ -11,16 +11,21 @@
  * the opposite shape — prompt in on argv or stdin, answer out on stdout, exit
  * code says whether it worked — so this script supplies it.
  *
- * It never handles credentials. The language server it attaches to is the one
- * the user already signed in to; a second server started on its own reaches
- * Google unauthenticated and 401s on the first call, which is why attaching is
- * the only supported mode.
+ * It never handles credentials. It attaches either to a seat in the
+ * `agy-profile.mjs` pool, a standalone server the user signed in to one Google
+ * account each, or to the language server of the running IDE.
  *
  * Usage:
  *   node agy-headless.mjs [options] [prompt]
  *   ... | node agy-headless.mjs [options]          # prompt on stdin
  *
  * Options:
+ *   --seat <auto|pool|ide|<id>>      Which server answers. auto (default):
+ *                                    the pool when seats are registered,
+ *                                    else the IDE, and the IDE again when
+ *                                    every pool seat fails. pool: pool only.
+ *                                    ide: the IDE only. <id>: that pool seat.
+ *                                    Env: AGY_SEAT.
  *   --model <flash_lite|flash|pro>   Model tier. Default: pro.
  *   --tools <shared|web|read|any>    Default: shared — native tools under the
  *                                   shared user rules. web/read audit tool
@@ -32,16 +37,29 @@
  *                                    outside-of-project (no workspace, so the
  *                                    agent has no repository to write into).
  *   --title <text>                   Conversation title shown in the IDE.
- *   --json                           Emit {text, conversationId, ms, model}.
- *   --print-target                   Report the discovered server and exit.
+ *   --json                           Emit {text, conversationId, ms, model, seat}.
+ *   --print-target                   Report pool seats and IDE servers, start
+ *                                    no model turn, and exit.
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
+import {
+  ROOT,
+  fetchIdentity,
+  fetchQuota,
+  geminiDirOf,
+  isAlive,
+  parseJsonFile,
+  readDiscovery,
+  readRegistry,
+  startSeat,
+  waitForDiscovery,
+} from './agy-profile.mjs'
 
 /** Where Antigravity keeps its language server and its trajectory databases. */
 const AGENTAPI_EXE =
@@ -54,8 +72,8 @@ const AGENTAPI_EXE =
     'bin',
     'language_server.exe',
   )
-const GEMINI_DIR = process.env['ANTIGRAVITY_GEMINI_DIR'] ?? join(homedir(), '.gemini')
-const CONVERSATIONS_DIR = join(GEMINI_DIR, 'antigravity', 'conversations')
+/** The IDE's Gemini directory. A pool seat keeps its own under `ROOT/profiles`. */
+const IDE_GEMINI_DIR = process.env['ANTIGRAVITY_GEMINI_DIR'] ?? join(homedir(), '.gemini')
 
 /** Model tiers `agentapi` resolves. Anything else fails before the call. */
 const TIERS = new Set(['flash_lite', 'flash', 'pro'])
@@ -76,6 +94,7 @@ function parseArgs(argv) {
     project: process.env['ANTIGRAVITY_PROJECT_ID'] ?? 'outside-of-project',
     title: 'DSH council seat',
     tools: 'shared',
+    seat: process.env['AGY_SEAT'] ?? 'auto',
     contextFile: undefined,
     json: false,
     printTarget: false,
@@ -91,6 +110,7 @@ function parseArgs(argv) {
     else if (a === '--project') opts.project = argv[++i]
     else if (a === '--title') opts.title = argv[++i]
     else if (a === '--tools') opts.tools = argv[++i]
+    else if (a === '--seat') opts.seat = argv[++i]
     else if (a === '--json') opts.json = true
     else if (a === '--print-target') opts.printTarget = true
     else if (a === '--help' || a === '-h') opts.help = true
@@ -144,6 +164,10 @@ function discoverServers() {
   const found = []
   for (const row of rows) {
     const cmd = String(row?.cmd ?? '')
+    // Pool seats are started with --gemini_dir and the IDE's server is not.
+    // A pool seat's trajectories are not under the IDE's Gemini directory, so
+    // attaching to one here would wait on a database that never appears.
+    if (/--gemini_dir/.test(cmd)) continue
     const token = /--csrf_token[= ]([0-9a-fA-F-]{8,})/.exec(cmd)?.[1]
     const ports = (Array.isArray(row?.ports) ? row.ports : [row?.ports])
       .map(Number)
@@ -173,43 +197,59 @@ function isWrongPort(text) {
   return /server preface|frame too large|connection error|connection refused/i.test(text)
 }
 
-function startConversation(opts) {
+/**
+ * Start a conversation on one server, trying each of its loopback ports.
+ *
+ * `target` is `{ token, ports, pid }`. Throws on the first error that is not a
+ * wrong-port transport miss.
+ */
+function startOn(target, opts) {
+  const failures = []
+  for (const port of target.ports) {
+    const res = agentapi({ token: target.token, project: opts.project }, port, [
+      'new-conversation',
+      `--model=${opts.model}`,
+      `--title=${opts.title}`,
+      opts.prompt,
+    ])
+    const text = `${res.stdout ?? ''}${res.stderr ?? ''}`
+    let parsed
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      failures.push(`port ${port}: ${text.trim().slice(0, 200)}`)
+      continue
+    }
+    const id = parsed?.response?.newConversation?.conversationId
+    if (id) return { conversationId: id, port, pid: target.pid }
+    const err = String(parsed?.error ?? 'unknown error')
+    if (isWrongPort(err)) {
+      failures.push(`port ${port}: ${err}`)
+      continue
+    }
+    throw new Error(err)
+  }
+  throw new Error(`no agentapi endpoint answered. Tried: ${failures.join(' | ')}`)
+}
+
+async function runOnIde(opts, deadline) {
   const servers = discoverServers()
   if (servers.length === 0) {
-    throw new Error(
-      'no signed-in Antigravity language server found. Start the Antigravity IDE ' +
-        '(it owns the OAuth session; a server started here would 401) and retry.',
-    )
+    throw new Error('no signed-in Antigravity IDE language server found. Start the Antigravity IDE and retry.')
   }
   const failures = []
   for (const server of servers) {
-    for (const port of server.ports) {
-      const target = { token: server.token, project: opts.project }
-      const res = agentapi(target, port, [
-        'new-conversation',
-        `--model=${opts.model}`,
-        `--title=${opts.title}`,
-        opts.prompt,
-      ])
-      const text = `${res.stdout ?? ''}${res.stderr ?? ''}`
-      let parsed
-      try {
-        parsed = JSON.parse(text)
-      } catch {
-        failures.push(`port ${port}: ${text.trim().slice(0, 200)}`)
-        continue
-      }
-      const id = parsed?.response?.newConversation?.conversationId
-      if (id) return { conversationId: id, port, token: server.token, pid: server.pid }
-      const err = String(parsed?.error ?? 'unknown error')
-      if (isWrongPort(err)) {
-        failures.push(`port ${port}: ${err}`)
-        continue
-      }
-      throw new Error(err)
+    let started
+    try {
+      started = startOn(server, opts)
+    } catch (err) {
+      failures.push(`pid ${server.pid}: ${err instanceof Error ? err.message : String(err)}`)
+      continue
     }
+    const result = await waitForAnswer(started.conversationId, { ...opts, timeout: deadline - Date.now() }, IDE_GEMINI_DIR)
+    return { ...result, ...started, seat: 'ide' }
   }
-  throw new Error(`no agentapi endpoint answered. Tried: ${failures.join(' | ')}`)
+  throw new Error(`no IDE server answered. ${failures.join(' | ')}`)
 }
 
 /* -------------------------------------------------------------------------
@@ -469,6 +509,248 @@ function answerFrom(steps) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+/* -------------------------------------------------------------------------
+ * Seat pool.
+ *
+ * `agy-profile.mjs` keeps several Google accounts signed in to their own
+ * standalone language servers, each with its own weekly quota. A run leases
+ * one seat, and a seat that fails is handed off: the prompt is replayed into a
+ * fresh conversation on the next seat, because a trajectory lives in one
+ * seat's directory and cannot be resumed on another.
+ *
+ * Ranking is tier weight x remaining fraction, divided by the runs already in
+ * flight on that seat. The fraction alone is not comparable across seats: the
+ * server says the weekly limit "is tied directly to your individual tier", so
+ * a free seat at 90% is not necessarily fuller than a paid one at 60%. The
+ * in-flight divisor is what spreads a council's parallel seats over several
+ * accounts instead of stacking them on the fullest one.
+ *
+ * A pick and its lease are written under one lock file, so three council
+ * seats launched in the same instant still see each other's leases. A lease is
+ * named `<seat>.<pid>.lease`, and a lease whose process has died is ignored
+ * and swept, so a crashed run cannot hold a seat.
+ * ---------------------------------------------------------------------- */
+
+const LEASES_DIR = join(ROOT, 'leases')
+const PARKED_FILE = join(ROOT, 'parked.json')
+const LOCK_FILE = join(ROOT, 'lease.lock')
+const TOKEN_FILE = join('.gemini', 'jetski-standalone-oauth-token')
+
+/**
+ * Relative weekly allowance per tier, used only to rank seats.
+ *
+ * `free-tier` and `g1-plus-tier` are measured: the server describes Plus as
+ * "the minimum base limits", the same as free. The two paid tiers above them
+ * are placeholders until a seat on one is seen; a registry entry may carry its
+ * own `weight` to override.
+ */
+export const TIER_WEIGHTS = { 'free-tier': 1, 'g1-plus-tier': 1, 'g1-pro-tier': 4, 'g1-ultra-tier': 16 }
+
+/** A seat failure with a kind that decides whether the seat is parked. */
+class SeatError extends Error {
+  constructor(kind, message) {
+    super(message)
+    this.kind = kind
+  }
+}
+
+const FAILURE_PATTERNS = [
+  { kind: 'outdated', pattern: /current version of Antigravity is out of date/i },
+  {
+    kind: 'quota',
+    pattern:
+      /RESOURCE_EXHAUSTED|too many requests|\b(quota|rate limit)\b[^.\n]{0,40}\b(exceeded|exhausted|reached|depleted)\b|you have (reached|exceeded)/i,
+  },
+  { kind: 'signed-out', pattern: /UNAUTHENTICATED|not logged into Antigravity/i },
+]
+
+/** Classify an error message. Returns the failure kind, or undefined. */
+export function failureKind(text) {
+  return FAILURE_PATTERNS.find(({ pattern }) => pattern.test(String(text ?? '')))?.kind
+}
+
+/**
+ * A service error that arrived as the agent's answer.
+ *
+ * Measured: an outdated client gets its rejection written to the trajectory at
+ * the same path as a real answer, so without this check the rejection is
+ * printed as the seat's reply and exits 0. Only short answers are classified;
+ * a real answer that happens to discuss quotas is long enough to pass.
+ */
+export function serviceErrorIn(answer) {
+  const text = String(answer ?? '').trim()
+  if (text.length === 0 || text.length > 400) return undefined
+  const kind = failureKind(text)
+  return kind ? { kind, text } : undefined
+}
+
+export function scoreSeat({ weight = 1, remainingFraction = 0, inflight = 0 }) {
+  if (!(remainingFraction > 0) || !(weight > 0)) return 0
+  return (weight * remainingFraction) / (1 + inflight)
+}
+
+/** Usable seats, best first. `inflight` maps seat id to runs already leased. */
+export function rankSeats(rows, inflight = new Map()) {
+  return rows
+    .filter((row) => !row.skip)
+    .map((row) => ({ ...row, inflight: inflight.get(row.seat.id) ?? 0 }))
+    .map((row) => ({ ...row, score: scoreSeat(row) }))
+    .filter((row) => row.score > 0)
+    .sort((a, b) => b.score - a.score)
+}
+
+/** Parked seats still inside their parking window, keyed by seat id. */
+export function readParked(path = PARKED_FILE, now = Date.now()) {
+  let parsed
+  try {
+    parsed = parseJsonFile(path)
+  } catch {
+    return {}
+  }
+  const live = {}
+  for (const [id, entry] of Object.entries(parsed ?? {})) {
+    if (Date.parse(entry?.until) > now) live[id] = entry
+  }
+  return live
+}
+
+function park(seatId, until, reason) {
+  const parked = readParked()
+  parked[seatId] = { until, reason }
+  mkdirSync(ROOT, { recursive: true })
+  writeFileSync(PARKED_FILE, `${JSON.stringify(parked, null, 2)}\n`, 'utf8')
+}
+
+export function inflightBySeat(dir = LEASES_DIR) {
+  const counts = new Map()
+  if (!existsSync(dir)) return counts
+  for (const name of readdirSync(dir)) {
+    const match = /^([a-z0-9][a-z0-9_-]*)\.(\d+)\.lease$/.exec(name)
+    if (!match) continue
+    if (!isAlive(Number(match[2]))) {
+      rmSync(join(dir, name), { force: true })
+      continue
+    }
+    counts.set(match[1], (counts.get(match[1]) ?? 0) + 1)
+  }
+  return counts
+}
+
+async function withLock(fn) {
+  mkdirSync(ROOT, { recursive: true })
+  const deadline = Date.now() + 15_000
+  for (;;) {
+    try {
+      closeSync(openSync(LOCK_FILE, 'wx'))
+      break
+    } catch (err) {
+      if (err?.code !== 'EEXIST') throw err
+      try {
+        // Held only for a pick and one small write; anything older is a crash.
+        if (Date.now() - statSync(LOCK_FILE).mtimeMs > 10_000) rmSync(LOCK_FILE, { force: true })
+      } catch {
+        /* released between the failed open and the stat */
+      }
+      if (Date.now() > deadline) throw new Error(`seat pool lock ${LOCK_FILE} held for 15s`)
+      await sleep(40 + Math.random() * 120)
+    }
+  }
+  try {
+    return await fn()
+  } finally {
+    rmSync(LOCK_FILE, { force: true })
+  }
+}
+
+/**
+ * Check every registered seat without starting a model turn.
+ *
+ * A seat that is signed in but not running is started here, so a pool left
+ * cold by a reboot warms itself on the first council run instead of failing
+ * it. A seat that has never been signed in is skipped: signing in is the
+ * user's to do, with `agy-profile login`.
+ */
+export async function surveySeats(only) {
+  const seats = readRegistry().seats.filter((seat) => !only || seat.id === only)
+  if (only && seats.length === 0) throw new Error(`no seat "${only}" in ${join(ROOT, 'accounts.json')}`)
+  const parked = readParked()
+  return Promise.all(
+    seats.map(async (seat) => {
+      const geminiDir = geminiDirOf(seat)
+      const row = { seat, geminiDir }
+      if (!only && parked[seat.id]) return { ...row, skip: `parked until ${parked[seat.id].until}` }
+      let discovery = readDiscovery(geminiDir)
+      if (!discovery || !isAlive(discovery.pid)) {
+        if (!existsSync(join(geminiDir, TOKEN_FILE))) return { ...row, skip: 'never signed in' }
+        startSeat(seat)
+        discovery = await waitForDiscovery(geminiDir)
+        if (!discovery) return { ...row, skip: 'did not start within 30s' }
+      }
+      const quota = await fetchQuota(discovery, 15_000)
+      if (quota.state !== 'ok') {
+        return { ...row, discovery, skip: quota.state === 'signed-out' ? 'signed out' : `quota check failed: ${quota.error}` }
+      }
+      const bucket = quota.buckets.find((b) => b.bucketId === 'gemini-weekly')
+      const identity = await fetchIdentity(discovery, 15_000)
+      const weight = Number(seat.weight) > 0 ? Number(seat.weight) : (TIER_WEIGHTS[identity?.tierId] ?? 1)
+      return {
+        ...row,
+        discovery,
+        weight,
+        tierId: identity?.tierId ?? '',
+        remainingFraction: bucket?.remainingFraction ?? 0,
+        resetTime: bucket?.resetTime ?? '',
+      }
+    }),
+  )
+}
+
+async function runOnPool(opts, deadline) {
+  const only = opts.seat === 'auto' || opts.seat === 'pool' ? undefined : opts.seat
+  const rows = await surveySeats(only)
+  const failures = rows.filter((row) => row.skip).map((row) => `${row.seat.id}: ${row.skip}`)
+  const tried = new Set()
+  for (;;) {
+    const lease = await withLock(async () => {
+      const top = rankSeats(rows.filter((row) => !tried.has(row.seat.id)), inflightBySeat())[0]
+      if (!top) return undefined
+      mkdirSync(LEASES_DIR, { recursive: true })
+      const path = join(LEASES_DIR, `${top.seat.id}.${process.pid}.lease`)
+      writeFileSync(path, `${JSON.stringify({ model: opts.model, at: new Date().toISOString() })}\n`, 'utf8')
+      return { row: top, path }
+    })
+    if (!lease) break
+    const { row } = lease
+    tried.add(row.seat.id)
+    const release = () => rmSync(lease.path, { force: true })
+    process.once('exit', release)
+    try {
+      const target = {
+        token: row.discovery.csrfToken,
+        ports: [row.discovery.httpsPort, row.discovery.httpPort].filter(Boolean),
+        pid: row.discovery.pid,
+      }
+      const started = startOn(target, opts)
+      const result = await waitForAnswer(started.conversationId, { ...opts, timeout: deadline - Date.now() }, row.geminiDir)
+      return { ...result, ...started, seat: row.seat.id }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (Date.now() >= deadline - 1_000) throw err
+      const kind = err?.kind ?? failureKind(message) ?? 'error'
+      if (kind === 'quota' || kind === 'stalled') {
+        const until = kind === 'quota' && row.resetTime ? row.resetTime : new Date(Date.now() + 15 * 60_000).toISOString()
+        park(row.seat.id, until, message.slice(0, 200))
+      }
+      failures.push(`${row.seat.id} (${kind}): ${message.slice(0, 300)}`)
+      process.stderr.write(`agy-headless: seat ${row.seat.id} failed (${kind}); handing off\n`)
+    } finally {
+      release()
+      process.removeListener('exit', release)
+    }
+  }
+  throw new SeatError('pool', `no pool seat could answer. ${failures.join(' | ') || 'no seats registered'}`)
+}
+
 /**
  * Wait for the turn to finish.
  *
@@ -477,8 +759,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
  * nothing has been written for `quietMs`. Both conditions are needed: an agent
  * mid-tool-call goes quiet too, but its last step is not an assistant answer.
  */
-async function waitForAnswer(conversationId, opts) {
-  const dbPath = join(CONVERSATIONS_DIR, `${conversationId}.db`)
+async function waitForAnswer(conversationId, opts, geminiDir) {
+  const dbPath = join(geminiDir, 'antigravity', 'conversations', `${conversationId}.db`)
   const deadline = Date.now() + opts.timeout
   let lastChange = Date.now()
   let lastSignature = ''
@@ -501,10 +783,12 @@ async function waitForAnswer(conversationId, opts) {
     const settled = Date.now() - lastChange >= opts.quietMs
     if (settled && last && last.step_type === STEP_ASSISTANT) {
       const text = answerFrom(steps)
+      const failure = serviceErrorIn(text)
+      if (failure) throw new SeatError(failure.kind, `Antigravity rejected the turn: ${failure.text}`)
       if (text) return { text, steps }
     }
     if (settled && last && last.step_type === STEP_USER && Date.now() - lastChange > opts.quietMs * 4) {
-      throw new Error('Antigravity accepted the prompt but produced no answer (quota exhausted?)')
+      throw new SeatError('stalled', 'Antigravity accepted the prompt but produced no answer')
     }
   }
   throw new Error(`timed out after ${opts.timeout}ms waiting for conversation ${conversationId}`)
@@ -517,7 +801,23 @@ async function main() {
     return 0
   }
   if (opts.printTarget) {
-    process.stdout.write(`${JSON.stringify(discoverServers().map(({ pid, ports }) => ({ pid, ports })), null, 2)}\n`)
+    const only = ['auto', 'pool', 'ide'].includes(opts.seat) ? undefined : opts.seat
+    const rows = opts.seat === 'ide' ? [] : await surveySeats(only)
+    const inflight = inflightBySeat()
+    const scored = new Map(rankSeats(rows, inflight).map((row) => [row.seat.id, row.score]))
+    const pool = rows.map((row) => ({
+      id: row.seat.id,
+      pid: row.discovery?.pid,
+      tierId: row.tierId,
+      weight: row.weight,
+      remainingFraction: row.remainingFraction,
+      resetTime: row.resetTime,
+      inflight: inflight.get(row.seat.id) ?? 0,
+      score: scored.get(row.seat.id) ?? 0,
+      skip: row.skip,
+    }))
+    const ide = opts.seat === 'auto' || opts.seat === 'ide' ? discoverServers().map(({ pid, ports }) => ({ pid, ports })) : []
+    process.stdout.write(`${JSON.stringify({ pool, ide }, null, 2)}\n`)
     return 0
   }
   if (!TIERS.has(opts.model)) {
@@ -548,8 +848,20 @@ async function main() {
   opts.prompt = prompt
 
   const started = Date.now()
-  const { conversationId, port, pid } = startConversation(opts)
-  const { text, steps } = await waitForAnswer(conversationId, opts)
+  const deadline = started + opts.timeout
+  let run
+  if (opts.seat === 'ide' || (opts.seat === 'auto' && readRegistry().seats.length === 0)) {
+    run = await runOnIde(opts, deadline)
+  } else {
+    try {
+      run = await runOnPool(opts, deadline)
+    } catch (err) {
+      if (opts.seat !== 'auto' || err?.kind !== 'pool' || discoverServers().length === 0) throw err
+      process.stderr.write(`agy-headless: ${err.message}; falling back to the IDE\n`)
+      run = await runOnIde(opts, deadline)
+    }
+  }
+  const { text, steps, conversationId, port, pid, seat } = run
   const ms = Date.now() - started
 
   const violations = auditTools(steps, opts.tools)
@@ -566,10 +878,11 @@ async function main() {
 
   if (opts.json) {
     process.stdout.write(
-      `${JSON.stringify({ text, conversationId, ms, model: opts.model, tools: used, policy: opts.tools, port, pid })}\n`,
+      `${JSON.stringify({ text, conversationId, ms, model: opts.model, seat, tools: used, policy: opts.tools, port, pid })}\n`,
     )
   } else {
     process.stdout.write(`${text}\n`)
+    process.stderr.write(`agy-headless: answered by seat ${seat} in ${ms}ms\n`)
     if (used.length > 0) process.stderr.write(`agy-headless: tools used: ${used.join(', ')}\n`)
   }
   return 0

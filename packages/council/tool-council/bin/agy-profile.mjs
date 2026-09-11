@@ -32,9 +32,9 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 const LS_EXE =
   process.env['ANTIGRAVITY_LS_EXE'] ??
@@ -47,7 +47,7 @@ const LS_EXE =
     'language_server.exe',
   )
 
-const ROOT = process.env['DSH_ANTIGRAVITY_ROOT'] ?? join(homedir(), '.dsh', 'antigravity')
+export const ROOT = process.env['DSH_ANTIGRAVITY_ROOT'] ?? join(homedir(), '.dsh', 'antigravity')
 const REGISTRY = join(ROOT, 'accounts.json')
 const PROFILES = join(ROOT, 'profiles')
 
@@ -107,7 +107,7 @@ function seatOf(registry, id) {
   return registry.seats.find((s) => s.id === id)
 }
 
-function geminiDirOf(seat) {
+export function geminiDirOf(seat) {
   return seat.geminiDir ?? join(PROFILES, seat.id)
 }
 
@@ -189,6 +189,49 @@ export function seatEnv(geminiDir) {
   }
 }
 
+/**
+ * The installed IDE's version, as the IDE itself reports it to its server.
+ *
+ * The IDE launches its standalone server with `--override_ide_version` set to
+ * `app.getVersion()`. A server started without it reports no IDE version, and
+ * Google answers every turn with "Your current version of Antigravity is out of
+ * date" even when the install is current. Electron's version is the
+ * `package.json` inside `resources/app.asar`, read here from the archive's
+ * JSON header so no Electron process is needed.
+ */
+export function ideVersion(lsExe = LS_EXE) {
+  if (process.env['ANTIGRAVITY_IDE_VERSION']) return process.env['ANTIGRAVITY_IDE_VERSION']
+  const asar = join(dirname(dirname(lsExe)), 'app.asar')
+  let fd
+  try {
+    fd = openSync(asar, 'r')
+    const head = Buffer.alloc(16)
+    readSync(fd, head, 0, 16, 0)
+    const headerSize = head.readUInt32LE(4)
+    const jsonLength = head.readUInt32LE(12)
+    const json = Buffer.alloc(jsonLength)
+    readSync(fd, json, 0, jsonLength, 16)
+    const entry = JSON.parse(json.toString('utf8'))?.files?.['package.json']
+    if (!entry || typeof entry.size !== 'number') return undefined
+    const body = Buffer.alloc(entry.size)
+    readSync(fd, body, 0, entry.size, 8 + headerSize + Number(entry.offset))
+    const version = JSON.parse(body.toString('utf8'))?.version
+    return typeof version === 'string' && version ? version : undefined
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
+function requireIdeVersion() {
+  const version = ideVersion()
+  if (!version) {
+    fail(`cannot read the Antigravity version from ${join(dirname(dirname(LS_EXE)), 'app.asar')}; set ANTIGRAVITY_IDE_VERSION`)
+  }
+  return version
+}
+
 function baseArgs(geminiDir, csrfToken) {
   return [
     '--standalone',
@@ -197,6 +240,8 @@ function baseArgs(geminiDir, csrfToken) {
     'antigravity',
     '--subclient_type',
     'hub',
+    '--override_ide_version',
+    requireIdeVersion(),
     '--override_user_agent_name',
     'antigravity',
     '--http_server_port',
@@ -341,7 +386,7 @@ export function bucketsFrom(body) {
   return out
 }
 
-function startSeat(seat) {
+export function startSeat(seat) {
   const geminiDir = geminiDirOf(seat)
   const existing = readDiscovery(geminiDir)
   if (existing && isAlive(existing.pid)) return { started: false, pid: existing.pid }
@@ -357,7 +402,7 @@ function startSeat(seat) {
   return { started: true, pid: child.pid }
 }
 
-async function waitForDiscovery(geminiDir, timeoutMs = 30_000) {
+export async function waitForDiscovery(geminiDir, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const found = readDiscovery(geminiDir)

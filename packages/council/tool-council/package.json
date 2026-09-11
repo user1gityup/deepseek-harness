@@ -22,7 +22,8 @@
     "lib/index.js",
     "lib/invariant.js",
     "lib/types/**/*.d.ts",
-    "bin/agy-headless.mjs"
+    "bin/agy-headless.mjs",
+    "bin/agy-profile.mjs"
   ],
   "license": "MIT",
   "dependencies": {

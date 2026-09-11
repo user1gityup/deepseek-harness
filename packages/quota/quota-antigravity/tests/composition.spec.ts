@@ -16,10 +16,12 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import FileSettingsProvider from '../../../settings/settings-file/src/index.ts'
 import * as quota from '../src/index.ts'
-import { readQuota } from '../src/reading.ts'
-vi.mock('../src/reading.ts', () => ({ readQuota: vi.fn() }))
+import { readPool } from '../src/pool.ts'
+vi.mock('../src/pool.ts', () => ({ readPool: vi.fn(), defaultPoolRoot: () => '' }))
 
-const rows = [{ id: 'weekly', group: 'Gemini Models', label: 'Weekly', remaining: 89.4, resetsAt: null, window: 'weekly', note: null }]
+const buckets = [{ id: 'weekly', group: 'Gemini Models', label: 'Weekly', remaining: 89.4, resetsAt: null, window: 'weekly', note: null, accounts: 2 }]
+const rows = { buckets, seats: [] }
+const readQuota = readPool
 
 /** Write the loader config the plugin boots from. */
 async function writeConfig(root: string): Promise<void> {

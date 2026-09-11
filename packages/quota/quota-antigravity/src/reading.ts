@@ -43,8 +43,27 @@ export interface DiscoveredServer {
   ports: number[]
 }
 
+/** The account facts `GetUserStatus` carries, reduced to what the pool needs. */
+export interface AccountStatus {
+  /**
+   * Lower-cased account email, used only to count one Google account once when
+   * two servers are signed in to it. It is never published to settings.
+   */
+  account: string | undefined
+  /** `userTier.id`, such as `free-tier` or `g1-plus-tier`; empty when unknown. */
+  tierId: string
+  /** The tier's display name; empty when unknown. */
+  tierName: string
+}
+
 /** Connect endpoint the quota summary is served from. */
 export const QUOTA_PATH = '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary'
+/** Connect endpoint the signed-in account and its tier are served from. */
+export const STATUS_PATH = '/exa.language_server_pb.LanguageServerService/GetUserStatus'
+/** Failure message for a server that answers but holds no signed-in account. */
+export const SIGNED_OUT_MESSAGE = 'Antigravity is not signed in'
+/** Failure message when discovery finds no IDE language server at all. */
+export const NO_SERVER_MESSAGE = 'No running Antigravity language server found'
 /** Longest provider sentence kept per bucket. */
 const NOTE_LIMIT = 240
 
@@ -105,12 +124,40 @@ export function parseQuotaSummary(value: unknown): QuotaBucket[] {
 }
 
 /**
- * Read the CSRF token out of a language server's command line.
+ * Normalize a `GetUserStatus` answer to the account and its tier.
+ *
+ * The tier is read from `userTier`, never from `planStatus.planInfo`: that
+ * field is inherited Codeium plan scaffolding and reports "Pro" for accounts
+ * whose real Antigravity tier is `free-tier`.
+ * @param value - Untrusted Connect response body.
+ * @returns the account key and tier; empty fields when the answer carries none.
+ */
+export function parseUserStatus(value: unknown): AccountStatus {
+  const body = record(value)
+  const status = record(body?.userStatus) ?? body
+  const tier = record(status?.userTier)
+  const email = status?.email
+  return {
+    account: typeof email === 'string' && email.trim() ? email.trim().toLowerCase() : undefined,
+    tierId: typeof tier?.id === 'string' ? tier.id : '',
+    tierName: text(tier?.name) ?? '',
+  }
+}
+
+/**
+ * Read the CSRF token out of the IDE language server's command line.
+ *
+ * Pool seats started by `agy-profile.mjs` are language servers too, and their
+ * command lines also name Antigravity and carry a CSRF token. Each is started
+ * with `--gemini_dir` and the IDE's own server is not, so that flag is what
+ * keeps a seat's account from being reported as the IDE's. Seats are read
+ * from the pool registry instead.
  * @param command - Full command line of a candidate process.
- * @returns the token, or undefined when this is not an Antigravity server.
+ * @returns the token, or undefined when this is not the IDE's Antigravity server.
  */
 export function tokenOf(command: string): string | undefined {
   if (!/language_server/i.test(command) || !/antigravity/i.test(command)) return undefined
+  if (/(?:^|\s)--?gemini_dir(?:=|\s)/i.test(command)) return undefined
   return /--csrf[_-]token(?:=|\s+)\s*["']?([a-z0-9._-]{8,})/i.exec(command)?.[1]
 }
 
@@ -206,7 +253,7 @@ function probe(file: string, args: string[], timeoutMs: number, signal: AbortSig
 }
 
 /**
- * Find every Antigravity language server running for this user.
+ * Find every IDE Antigravity language server running for this user.
  * @param timeoutMs - Hard deadline for the whole discovery.
  * @param signal - Plugin disposal cancels the probes.
  * @returns Servers with a token and at least one listening port.
@@ -262,18 +309,19 @@ export function parseEndpoint(value: string): Endpoint | undefined {
 }
 
 /**
- * Ask one endpoint for the quota summary.
+ * Call one Connect method on one endpoint and return its parsed JSON body.
  *
  * The server presents a self-signed certificate on its TLS port, so
  * verification is off — the connection never leaves loopback, and the token it
  * carries came from a process owned by this same user.
  * @param endpoint - Loopback address to call.
  * @param token - Per-run CSRF token.
+ * @param path - Connect method path.
  * @param timeoutMs - Hard deadline for this call.
  * @param signal - Plugin disposal aborts the request.
- * @returns the parsed buckets.
+ * @returns the parsed body.
  */
-export function readEndpoint(endpoint: Endpoint, token: string, timeoutMs: number, signal: AbortSignal): Promise<QuotaBucket[]> {
+export function callEndpoint(endpoint: Endpoint, token: string, path: string, timeoutMs: number, signal: AbortSignal): Promise<unknown> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) { reject(new Error('Antigravity quota read cancelled')); return }
     if (!loopback(endpoint.host)) { reject(new Error('Antigravity endpoint must be loopback')); return }
@@ -283,7 +331,7 @@ export function readEndpoint(endpoint: Endpoint, token: string, timeoutMs: numbe
       host: endpoint.host,
       port: endpoint.port,
       method: 'POST',
-      path: QUOTA_PATH,
+      path,
       headers: {
         'content-type': 'application/json',
         'connect-protocol-version': '1',
@@ -302,8 +350,14 @@ export function readEndpoint(endpoint: Endpoint, token: string, timeoutMs: numbe
       })
       response.on('error', reject)
       response.on('end', () => {
-        if (response.statusCode !== 200) { reject(new Error(`Antigravity quota read returned ${String(response.statusCode)}`)); return }
-        try { resolve(parseQuotaSummary(JSON.parse(answer))) }
+        if (response.statusCode !== 200) {
+          // A signed-out server answers HTTP 500 with this sentence; it is the
+          // normal state of a seat whose refresh token lapsed, not a fault.
+          reject(new Error(/not logged into Antigravity/i.test(answer)
+            ? SIGNED_OUT_MESSAGE : `Antigravity quota read returned ${String(response.statusCode)}`))
+          return
+        }
+        try { resolve(JSON.parse(answer)) }
         catch { reject(new Error('Invalid Antigravity quota response')) }
       })
     })
@@ -317,19 +371,37 @@ export function readEndpoint(endpoint: Endpoint, token: string, timeoutMs: numbe
 }
 
 /**
- * Read the quota summary from a running Antigravity, trying each address it
- * listens on: one port speaks TLS and the other plain HTTP, and which is which
- * is not announced anywhere.
+ * Ask one endpoint for the quota summary.
+ * @param endpoint - Loopback address to call.
+ * @param token - Per-run CSRF token.
+ * @param timeoutMs - Hard deadline for this call.
+ * @param signal - Plugin disposal aborts the request.
+ * @returns the parsed buckets.
+ */
+export async function readEndpoint(endpoint: Endpoint, token: string, timeoutMs: number, signal: AbortSignal): Promise<QuotaBucket[]> {
+  return parseQuotaSummary(await callEndpoint(endpoint, token, QUOTA_PATH, timeoutMs, signal))
+}
+
+/** The IDE server's quota plus the account it is signed in to. */
+export interface IdeReading extends AccountStatus {
+  /** Buckets the IDE's account reports. */
+  buckets: QuotaBucket[]
+}
+
+/**
+ * Read the quota summary and account from the running Antigravity IDE, trying
+ * each address it listens on: one port speaks TLS and the other plain HTTP, and
+ * which is which is not announced anywhere.
  * The CSRF token is never configurable: it changes every time Antigravity
  * starts, and a stale one in settings would be a secret kept for nothing.
  * @param endpointOverride - Configured loopback endpoint, empty to discover.
  * @param timeoutMs - Hard deadline for one whole read.
  * @param signal - Plugin disposal cancels discovery and the call.
- * @returns Buckets from the first address that answers.
+ * @returns Buckets and account from the first address that answers.
  */
-export async function readQuota(
+export async function readIde(
   endpointOverride: string, timeoutMs: number, signal: AbortSignal,
-): Promise<QuotaBucket[]> {
+): Promise<IdeReading> {
   const deadline = Date.now() + timeoutMs
   const left = (): number => Math.max(1, deadline - Date.now())
   const pinned = parseEndpoint(endpointOverride)
@@ -344,13 +416,31 @@ export async function readQuota(
       attempts.push({ endpoint: { host: '127.0.0.1', port, secure: false }, token: server.token })
     }
   }
-  if (!attempts.length) throw new Error('No running Antigravity language server found')
+  if (!attempts.length) throw new Error(NO_SERVER_MESSAGE)
   let failure: Error | undefined
   for (const attempt of attempts) {
     if (signal.aborted) throw new Error('Antigravity quota read cancelled')
     if (Date.now() >= deadline) throw new Error('Antigravity quota read timed out')
-    try { return await readEndpoint(attempt.endpoint, attempt.token, Math.min(2000, left()), signal) }
-    catch (error) { failure = error instanceof Error ? error : new Error('Antigravity quota read failed') }
+    let buckets: QuotaBucket[]
+    try { buckets = await readEndpoint(attempt.endpoint, attempt.token, Math.min(2000, left()), signal) }
+    catch (error) { failure = error instanceof Error ? error : new Error('Antigravity quota read failed'); continue }
+    let status: AccountStatus = { account: undefined, tierId: '', tierName: '' }
+    try { status = parseUserStatus(await callEndpoint(attempt.endpoint, attempt.token, STATUS_PATH, Math.min(2000, left()), signal)) }
+    catch { /* The account only de-duplicates and labels; the quota stands without it. */ }
+    return { buckets, ...status }
   }
   throw failure ?? new Error('Antigravity quota read failed')
+}
+
+/**
+ * Read the quota summary from the running Antigravity IDE.
+ * @param endpointOverride - Configured loopback endpoint, empty to discover.
+ * @param timeoutMs - Hard deadline for one whole read.
+ * @param signal - Plugin disposal cancels discovery and the call.
+ * @returns Buckets from the first address that answers.
+ */
+export async function readQuota(
+  endpointOverride: string, timeoutMs: number, signal: AbortSignal,
+): Promise<QuotaBucket[]> {
+  return (await readIde(endpointOverride, timeoutMs, signal)).buckets
 }

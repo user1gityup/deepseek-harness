@@ -562,3 +562,11 @@
     # print mode cannot accept the harness tool set.
     - id: llm-claude-cli
       name: '@deepseek-ai/dsh-llm-claude-cli'
+
+    # The Antigravity adapter. It runs the same `agy-headless.mjs` driver the
+    # council's `agy-*` seats run, so a pick here spends the signed-in Google
+    # account pool and inherits its leasing and hand-off. Mounted so the route
+    # is selectable in the model picker, the default model and a subagent's
+    # model; nothing routes to it until one of those selects it. Text only.
+    - id: llm-antigravity
+      name: '@deepseek-ai/dsh-llm-antigravity'

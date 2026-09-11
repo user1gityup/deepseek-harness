@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { settingsNamespace, type SettingsScope } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
-import { readQuota } from './reading.ts'
+import { defaultPoolRoot, readPool } from './pool.ts'
 
 /** Cordis plugin identifier. */
 export const name = 'quota-antigravity'
@@ -14,14 +14,20 @@ export const ANTIGRAVITY_QUOTA_NAMESPACE = settingsNamespace('antigravity-quota'
 export interface Config {
   /** Register and refresh when enabled. */
   enabled?: boolean
-  /** Loopback endpoint override; empty discovers the running language server. */
+  /** Loopback endpoint override for the IDE; empty discovers the running language server. */
   endpoint?: string
+  /** Seat pool root; empty uses `agy-profile.mjs`'s own (`~/.dsh/antigravity`). */
+  poolRoot?: string
+  /** Also read the Antigravity IDE's own account beside the pool seats. */
+  includeIde?: boolean
   /** Poll period in milliseconds; zero disables automatic polling after boot. */
   refreshIntervalMs?: number
   /** Deadline for a single read in milliseconds. */
   timeoutMs?: number
-  /** Serialized normalized quota buckets, without account identifiers or credentials. */
+  /** Serialized buckets combined across every distinct account, without identifiers or credentials. */
   bucketsJson?: string
+  /** Serialized per-account rows, without account identifiers or credentials. */
+  seatsJson?: string
   /** Last successful capture in epoch milliseconds. */
   capturedAt?: number
   /** Monotonic refresh request from the panel. */
@@ -32,8 +38,9 @@ export interface Config {
 /** Loader configuration and published state. */
 export const Config: z<Config> = z.object({
   enabled: z.boolean().default(true), endpoint: z.string().default(''),
+  poolRoot: z.string().default(''), includeIde: z.boolean().default(true),
   refreshIntervalMs: z.natural().default(300_000), timeoutMs: z.number().min(1000).default(20_000),
-  bucketsJson: z.string().default('[]'), capturedAt: z.number().default(0),
+  bucketsJson: z.string().default('[]'), seatsJson: z.string().default('[]'), capturedAt: z.number().default(0),
   refreshRequestedAt: z.number().default(0), refreshState: z.string().default('idle'),
 })
 /**
@@ -71,10 +78,20 @@ export function apply(ctx: Context, config: Config): void {
       pending = (async () => {
         try {
           await ctx.settings.update(ANTIGRAVITY_QUOTA_NAMESPACE, { refreshState: 'running' })
-          const buckets = await readQuota(config.endpoint ?? '', config.timeoutMs ?? 20_000, controller.signal)
-          if (!controller.signal.aborted) await ctx.settings.update(ANTIGRAVITY_QUOTA_NAMESPACE, {
-            bucketsJson: JSON.stringify(buckets), capturedAt: Date.now(), refreshState: 'ok',
+          const reading = await readPool({
+            root: config.poolRoot?.trim() || defaultPoolRoot(),
+            endpoint: config.endpoint ?? '',
+            includeIde: config.includeIde !== false,
+            timeoutMs: config.timeoutMs ?? 20_000,
+            signal: controller.signal,
           })
+          if (controller.signal.aborted) return
+          // Account rows are published either way, so a pool where every seat
+          // is down or signed out says why; the combined figure is only
+          // replaced by a reading that has one.
+          await ctx.settings.update(ANTIGRAVITY_QUOTA_NAMESPACE, reading.buckets.length
+            ? { bucketsJson: JSON.stringify(reading.buckets), seatsJson: JSON.stringify(reading.seats), capturedAt: Date.now(), refreshState: 'ok' }
+            : { seatsJson: JSON.stringify(reading.seats), refreshState: 'failed' })
         } catch {
           // Read failures retain the last capture; no child output enters browser settings.
           if (!controller.signal.aborted) {

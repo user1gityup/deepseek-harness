@@ -11,7 +11,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
-import { AntigravityQuota, type AntigravityQuotaProps } from '../src/client/AntigravityQuota.tsx'
+import { AntigravityQuota, timeLeft, type AntigravityQuotaProps } from '../src/client/AntigravityQuota.tsx'
 import { en, zh } from '../src/client/locales.ts'
 import { apply } from '../src/client/index.ts'
 
@@ -60,6 +60,49 @@ describe('Antigravity quota panel', () => {
     const refresh = Array.from(container.querySelectorAll('button')).find(b => b.textContent === 'Refresh')
     await act(async () => { if (refresh !== undefined) fireEvent.click(refresh) })
     expect(set).toHaveBeenCalledWith('refreshRequestedAt', expect.any(Number))
+  })
+
+  it('headlines the combined Gemini bucket and lists each account with its state', async () => {
+    const soon = Math.floor(Date.now() / 1000) + 3 * 86_400 + 4 * 3600 + 120
+    const snapshot = { writable: true, value: {
+      bucketsJson: JSON.stringify([
+        { id: '3p-weekly', label: 'Weekly', group: 'Claude and GPT models', remaining: 99.9, resetsAt: soon, accounts: 2 },
+        { id: 'gemini-weekly', label: 'Weekly', group: 'Gemini Models', remaining: 64.1, resetsAt: soon, accounts: 2 },
+      ]),
+      seatsJson: JSON.stringify([
+        { id: 'seat1', label: 'Shift A', source: 'seat', state: 'ok', tierName: 'Google AI Plus', counted: true, inflight: 2, parkedUntil: null,
+          buckets: [{ id: 'gemini-weekly', label: 'Weekly', group: 'Gemini Models', remaining: 97.6, resetsAt: soon }] },
+        { id: 'gone1', label: 'Google One', source: 'seat', state: 'ok', tierName: 'Google AI Plus', counted: true, inflight: 0,
+          parkedUntil: Date.now() + 3_630_000, buckets: [] },
+        { id: 'fam1', label: 'family', source: 'seat', state: 'down', tierName: '', counted: false, inflight: 0, parkedUntil: null, buckets: [] },
+        { id: 'ide', label: 'Antigravity IDE', source: 'ide', state: 'ok', tierName: 'Google AI Plus', counted: false, inflight: 0,
+          parkedUntil: null, buckets: [] },
+        { id: 'broken' },
+      ]),
+      refreshState: 'ok', capturedAt: Date.now() } }
+    const t = (key: keyof typeof en, values: Record<string, string> = {}) => Object.entries(values).reduce((s, [k, v]) => s.replace(`{${k}}`, v), en[key])
+    const props = {
+      wide: false, t, useQuota: (select: (s: unknown) => unknown) => select(snapshot), refresh: async () => {},
+    } as unknown as AntigravityQuotaProps
+    const { container } = render(<AntigravityQuota {...props} />)
+    expect(container.querySelector('button')?.textContent).toContain('64.1% left')
+    await act(async () => { const trigger = container.querySelector('button'); if (trigger !== null) fireEvent.click(trigger) })
+    const text = container.textContent ?? ''
+    expect(text).toContain('All accounts combined (2)')
+    expect(text).toContain('Shift A')
+    expect(text).toContain('Google AI Plus · 2 running')
+    expect(text).toContain('parked 1h 0m')
+    expect(text).toContain('Not running')
+    expect(text).toContain('same account, counted once')
+    expect(text).toContain('refills in 3d 4h')
+    expect(container.querySelectorAll('[data-state]')).toHaveLength(4)
+  })
+
+  it('formats countdowns', () => {
+    expect(timeLeft(-1)).toBe('0m')
+    expect(timeLeft(12 * 60_000)).toBe('12m')
+    expect(timeLeft(5 * 3_600_000 + 12 * 60_000)).toBe('5h 12m')
+    expect(timeLeft(3 * 86_400_000 + 4 * 3_600_000)).toBe('3d 4h')
   })
 
   it('ships matching English and Chinese copy', () => { expect(Object.keys(en).sort()).toEqual(Object.keys(zh).sort()) })

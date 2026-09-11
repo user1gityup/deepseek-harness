@@ -92,6 +92,35 @@
   color: var(--dsw-alias-label-secondary);
 }
 
+.seats {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+.seat { margin-bottom: 10px; }
+
+.seatName { font-weight: 600; }
+
+.seatStatus {
+  font-size: 10px;
+  text-align: right;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.seat[data-state='down'] .seatName,
+.seat[data-state='signed-out'] .seatName,
+.seat[data-state='error'] .seatName { color: var(--dsw-alias-label-secondary); }
+
+.seatBucket {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 2px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+}
+
 .row {
   display: flex;
   align-items: center;

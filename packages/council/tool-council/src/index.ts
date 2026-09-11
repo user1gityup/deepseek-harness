@@ -19,9 +19,9 @@ import type {} from '@deepseek-ai/dsh-web'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { readBalance } from './budget.ts'
 import { detectPalette } from './colors.ts'
 import { compareCouncil, renderComparison } from './benchmarks.ts'
@@ -366,9 +366,16 @@ export interface Config {
   observedCliTokensPerWeek?: number
   /**
    * Shared-memory digest handed to every seat. Defaults to the agent-memory
-   * plugin's digest; set false to run the council without shared memory.
+   * plugin's digest; set false to run the council without that digest.
    */
   memoryDigest?: string | false
+  /**
+   * Index of the user's shared brain, handed to every seat ahead of the digest
+   * so seats and swarm workers start from the same notes as Claude Code, Codex
+   * and the DSH agents. Defaults to `~/.claude/shared-brain/MEMORY.md`; set
+   * false to leave it out.
+   */
+  brainIndex?: string | false
 }
 
 /** Loader schema for the council tool. */
@@ -460,6 +467,7 @@ export const Config: z<Config> = z.object({
   subscriptionUsdPerSeat: z.number().default(20),
   observedCliTokensPerWeek: z.number(),
   memoryDigest: z.union([z.string(), z.const(false)]),
+  brainIndex: z.union([z.string(), z.const(false)]),
 })
 
 /** Tool result value, kept flat so the model can read it without unwrapping. */
@@ -637,29 +645,75 @@ function defaultDigestPath(): string {
   return join(home !== undefined && home !== '' ? home : join(homedir(), '.dsh'), 'memory', 'digest.md')
 }
 
+/** Default shared brain index: the store Claude Code, Codex and DSH share. */
+function defaultBrainIndexPath(): string {
+  return join(homedir(), '.claude', 'shared-brain', 'MEMORY.md')
+}
+
+function readTextFile(path: string): string | undefined {
+  if (!existsSync(path)) return undefined
+  try {
+    return readFileSync(path, 'utf8')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Render the brain index as seat context.
+ * @param indexPath - the index file, whose directory is the store.
+ * @param index - the index text.
+ * @returns the section that opens every seat's shared memory.
+ */
+export function renderBrainContext(indexPath: string, index: string): string {
+  const store = dirname(indexPath).split('\\').join('/')
+  return [
+    '# Shared brain',
+    '',
+    `The user's shared memory store (${store}), used by every agent on this machine:`,
+    'Claude Code, Codex and every DSH agent. Each line below names one note. Notes are',
+    'decisions already made: follow one that bears on the question, and say so if one',
+    'contradicts what you observe.',
+    '',
+    index.replace(/\r\n/g, '\n').trim(),
+  ].join('\n')
+}
+
 /**
  * Resolve the shared-memory payload for one run.
  *
  * CLI seats take the path; hosted seats take the text. Both come from one
- * file, so every seat sees identical memory.
- * @param setting - configured path, or false to disable.
+ * file, so every seat sees identical memory. With a shared brain present, that
+ * file is a composite of the brain index and the digest, written beside the
+ * digest as `council-context.md`.
+ * @param setting - configured digest path, or false to leave the digest out.
+ * @param brainSetting - configured brain index path, or false to leave it out.
  * @returns the payload, or undefined when memory is off or absent.
  */
 export function resolveMemory(
   setting: string | false | undefined,
+  brainSetting?: string | false,
 ): { file?: string | undefined; text?: string | undefined } | undefined {
-  if (setting === false) return undefined
-  const path = setting ?? defaultDigestPath()
-  if (!existsSync(path)) return undefined
-  let text: string
-  try {
-    text = readFileSync(path, 'utf8')
-  } catch {
-    return undefined
-  }
+  const digestPath = setting === false ? undefined : setting ?? defaultDigestPath()
+  const digest = digestPath === undefined ? undefined : readTextFile(digestPath)
   // An empty digest is worse than none: it spends prompt tokens saying nothing.
-  if (text.trim() === '' || /_No memories recorded yet\._/.test(text)) return { file: path }
-  return { file: path, text }
+  const useful = digest !== undefined && digest.trim() !== '' && !/_No memories recorded yet\._/.test(digest)
+  const brainPath = brainSetting === false ? undefined : brainSetting ?? defaultBrainIndexPath()
+  const index = brainPath === undefined ? undefined : readTextFile(brainPath)
+  if (brainPath === undefined || index === undefined || index.trim() === '') {
+    if (digestPath === undefined || digest === undefined) return undefined
+    return useful ? { file: digestPath, text: digest } : { file: digestPath }
+  }
+  const text = `${[renderBrainContext(brainPath, index), ...useful ? ['', '---', '', digest.trim()] : []].join('\n')}\n`
+  const file = join(dirname(digestPath ?? defaultDigestPath()), 'council-context.md')
+  try {
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, text, 'utf8')
+  } catch {
+    // Hosted seats still get the text; only CLI seats lose the file.
+    return { text }
+  }
+  return { file, text }
 }
 
 export function apply(ctx: Context, config: Config = {}): void {
@@ -889,7 +943,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           signal: exec.signal,
           timeoutMs,
           sequential: args.sequential ?? config.sequential,
-          memory: resolveMemory(live().memoryDigest),
+          memory: resolveMemory(live().memoryDigest, live().brainIndex),
           web: ctx.web,
           webMaxResults: config.webMaxResults ?? 0,
         })
@@ -995,7 +1049,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         isTty: process.stdout.isTTY === true,
         env: process.env,
       })
-      const memory = resolveMemory(live().memoryDigest)
+      const memory = resolveMemory(live().memoryDigest, live().brainIndex)
       const active = currentSeats()
       const result = await runCouncil({
         memory,
@@ -1295,7 +1349,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         timeoutMs,
         signal: exec.signal,
         sequential: args.sequential ?? config.sequential,
-        memory: resolveMemory(live().memoryDigest),
+        memory: resolveMemory(live().memoryDigest, live().brainIndex),
         webMaxResults: config.webMaxResults ?? 0,
         files: diskSeam(),
         fileRoots: parseRoots(config.fileRoots),
@@ -1537,7 +1591,7 @@ export function apply(ctx: Context, config: Config = {}): void {
               timeoutMs,
               signal: exec.signal,
               sequential: config.sequential,
-              memory: resolveMemory(live().memoryDigest),
+              memory: resolveMemory(live().memoryDigest, live().brainIndex),
               webMaxResults: config.webMaxResults ?? 0,
               files: diskSeam(),
               fileRoots: parseRoots(config.fileRoots),
@@ -1607,7 +1661,7 @@ export function apply(ctx: Context, config: Config = {}): void {
               signal: exec.signal,
               timeoutMs,
               sequential: config.sequential,
-              memory: resolveMemory(live().memoryDigest),
+              memory: resolveMemory(live().memoryDigest, live().brainIndex),
               webMaxResults: config.webMaxResults ?? 0,
             })
             if (proposed.phase === 'plan' && settingsNow.autoApprove !== true) {
@@ -1677,7 +1731,7 @@ export function apply(ctx: Context, config: Config = {}): void {
             sequential: config.sequential,
             planMode: config.planMode ?? 'council',
             planOnly: !approved,
-            memory: resolveMemory(live().memoryDigest),
+            memory: resolveMemory(live().memoryDigest, live().brainIndex),
             webMaxResults: config.webMaxResults ?? 0,
             seatResearch: config.seatResearch !== false,
             researchConcurrency: config.researchConcurrency ?? 3,
@@ -1953,7 +2007,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         signal: exec.signal,
         timeoutMs,
         sequential: args.sequential ?? config.sequential,
-        memory: resolveMemory(live().memoryDigest),
+        memory: resolveMemory(live().memoryDigest, live().brainIndex),
         webMaxResults: config.webMaxResults ?? 0,
         // An approved run writes where the plan said it would, so the report
         // the user read names the directories the files actually land in.

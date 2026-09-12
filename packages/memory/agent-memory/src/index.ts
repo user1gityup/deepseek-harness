@@ -13,10 +13,23 @@ import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { agentMemoryDomainSpec, memoryKinds } from './spec.ts'
 import { registerMemoryTools } from './tools.ts'
+import { shareFacts } from './brain.ts'
+import type { SharedFact } from './brain.ts'
 import type { MemoryEntry, MemoryKind } from './spec.ts'
 
 export { agentMemoryDomainSpec, memoryKinds } from './spec.ts'
 export type { CouncilRun, MemoryEntry, MemoryKind, SeatCall } from './spec.ts'
+export {
+  brainDirectory,
+  factBody,
+  factLine,
+  parseSharedFacts,
+  shareFacts,
+  withoutHomePaths,
+  FACTS_NOTE,
+  SHARED_LIMIT,
+} from './brain.ts'
+export type { SharedFact, ShareFactsOptions } from './brain.ts'
 
 /** Cordis plugin name. */
 export const name = 'agent-memory'
@@ -31,6 +44,13 @@ export interface Config {
   digestLimit?: number
   /** Register the model-facing memory tools. On by default. */
   tools?: boolean
+  /**
+   * Shared brain directory. Entries are published there as one line each, and
+   * the facts other machines published are rendered into the digest. Defaults
+   * to `$DSH_BRAIN_DIR` or `~/.claude/shared-brain`; false keeps this machine's
+   * memory to itself.
+   */
+  brainDir?: string | false
 }
 
 /** Group entries by kind, newest first inside each group. */
@@ -49,11 +69,16 @@ function groupByKind(entries: readonly MemoryEntry[]): Map<MemoryKind, MemoryEnt
  * of them (Claude Code, Codex) discover markdown context files natively.
  * @param entries - the remembered items.
  * @param limit - maximum entries to render.
+ * @param shared - facts other machines remembered, from the shared brain.
  * @returns the digest text.
  */
-export function renderDigest(entries: readonly MemoryEntry[], limit = 200): string {
+export function renderDigest(
+  entries: readonly MemoryEntry[],
+  limit = 200,
+  shared: readonly SharedFact[] = [],
+): string {
   const out: string[] = ['# Shared agent memory', '']
-  if (entries.length === 0) {
+  if (entries.length === 0 && shared.length === 0) {
     out.push('_No memories recorded yet._', '')
     return out.join('\n')
   }
@@ -73,6 +98,16 @@ export function renderDigest(entries: readonly MemoryEntry[], limit = 200): stri
       out.push(`- ${entry.text}${tags}`)
       rendered += 1
     }
+    out.push('')
+  }
+  if (shared.length > 0) {
+    out.push(
+      '## remembered on other machines',
+      '',
+      'From the shared brain, so every machine works from the same memory.',
+      '',
+    )
+    for (const fact of shared) out.push(`- [${fact.kind}] ${fact.body} - ${fact.machine}`)
     out.push('')
   }
   return out.join('\n')
@@ -128,7 +163,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       const entries = domain.table('entries')
       const refresh = (): void => {
         const all = [...entries.entries()].map(([, value]) => value)
-        writeDigest(renderDigest(all, limit), digestPath)
+        // Publish this machine's entries and take in the other machines', so the
+        // digest every agent and seat reads is the same on every machine.
+        const shared = shareFacts(all, config.brainDir === undefined ? {} : { brainDir: config.brainDir })
+        writeDigest(renderDigest(all, limit, shared), digestPath)
       }
       refresh()
       if (config.tools !== false) {

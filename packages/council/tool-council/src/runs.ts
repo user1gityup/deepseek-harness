@@ -24,6 +24,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { shareRun } from './brain.ts'
 import type { SeatId } from './colors.ts'
 import type { SeatReview } from './council.ts'
 import type { SeatReply } from './seats.ts'
@@ -101,6 +102,14 @@ export function saveRun(record: RunRecord): string | undefined {
     const path = join(directory, `${record.id}.json`)
     writeFileSync(path, JSON.stringify(record), { mode: 0o600 })
     prune(directory)
+    // One line per run in the shared brain, so a run saved here is visible on
+    // every machine that shares it. Never fatal: the brain's own collection
+    // picks the record up from disk if this cannot write.
+    try {
+      shareRun(record)
+    } catch {
+      // Same reason the whole function swallows: a filed run must not fail here.
+    }
     return path
   } catch {
     return undefined

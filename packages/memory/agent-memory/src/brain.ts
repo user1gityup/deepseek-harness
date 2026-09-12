@@ -82,6 +82,26 @@ export function factBody(entry: MemoryEntry): string {
 }
 
 /**
+ * The id a fact carries in the shared note.
+ *
+ * Derived from the text with home folders written as `~`, never from the raw
+ * text, and never from the entry's own id: a fact naming the machine it was
+ * written on is the same fact everywhere, but its raw text differs per machine.
+ * Hashing first gave each machine its own id, the dedupe missed, and one fact
+ * appeared once per machine - identical on screen, because the line is
+ * normalised before it is written. Same algorithm as `idFor` in the memory
+ * tools and `dshFactId` in the brain's own tooling, so all three agree.
+ * @param text - the remembered text.
+ * @returns the shared id.
+ */
+export function sharedFactId(text: string): string {
+  const normalized = withoutHomePaths(text)
+  let hash = 0
+  for (let index = 0; index < normalized.length; index += 1) hash = (hash * 31 + normalized.charCodeAt(index)) | 0
+  return `m${(hash >>> 0).toString(36)}`
+}
+
+/**
  * Render one entry as the shared note's line. Kept byte-identical to the line
  * `brain-sync.mjs` writes when it collects the same fact from the digest.
  * @param entry - the remembered item.
@@ -90,7 +110,8 @@ export function factBody(entry: MemoryEntry): string {
  */
 export function factLine(entry: MemoryEntry, machine: string): string {
   return withoutHomePaths(
-    `- [${entry.kind}] ${factBody(entry)} - remembered on ${machine} <!-- dsh-fact id=${entry.id} machine=${machine} -->`,
+    `- [${entry.kind}] ${factBody(entry)} - remembered on ${machine}`
+    + ` <!-- dsh-fact id=${sharedFactId(entry.text)} machine=${machine} -->`,
   )
 }
 
@@ -137,7 +158,7 @@ export function shareFacts(
   }
   const machine = options.machine ?? hostname()
   const fresh = entries
-    .filter(entry => !text.includes(`dsh-fact id=${entry.id}`))
+    .filter(entry => !text.includes(`dsh-fact id=${sharedFactId(entry.text)}`))
     .map(entry => factLine(entry, machine))
   if (fresh.length > 0) {
     const next = `${text.replace(/\s*$/, '')}\n${fresh.join('\n')}\n`
@@ -148,6 +169,6 @@ export function shareFacts(
       // A note that cannot be written costs the sharing, not the session.
     }
   }
-  const mine = new Set(entries.map(entry => entry.id))
+  const mine = new Set(entries.map(entry => sharedFactId(entry.text)))
   return parseSharedFacts(text).filter(fact => !mine.has(fact.id)).slice(-SHARED_LIMIT)
 }

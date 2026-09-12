@@ -4,21 +4,27 @@
  * One machine's entries go into the shared note; what the other machines put
  * there comes back into this machine's digest, which is what every agent and
  * council seat reads.
+ *
+ * The id is the part that decides whether a fact appears once or once per
+ * machine, so it is taken from the text with home folders written as `~` -
+ * never from the raw text, and never from the entry's own id.
  */
 
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { FACTS_NOTE, factLine, parseSharedFacts, shareFacts } from '../src/brain.ts'
+import { FACTS_NOTE, factLine, parseSharedFacts, shareFacts, sharedFactId } from '../src/brain.ts'
 import { renderDigest } from '../src/index.ts'
 import type { MemoryEntry } from '../src/spec.ts'
+
+const TEXT = 'The council runs a planning round first.'
 
 function entry(overrides: Partial<MemoryEntry> = {}): MemoryEntry {
   return {
     id: 'mlocal',
     kind: 'fact',
-    text: 'The council runs a planning round first.',
+    text: TEXT,
     tags: ['council', 'cost'],
     scope: 'global',
     createdAt: 1,
@@ -44,11 +50,10 @@ describe('shareFacts', () => {
     rmSync(brain, { recursive: true, force: true })
   })
 
-  it('publishes local entries with their kind, tags and id', () => {
+  it('publishes local entries with their kind, tags and shared id', () => {
     shareFacts([entry()], { brainDir: brain, machine: 'A' })
     expect(readFileSync(note, 'utf8')).toContain(
-      '- [fact] The council runs a planning round first. _(council, cost)_ - remembered on A'
-      + ' <!-- dsh-fact id=mlocal machine=A -->',
+      `- [fact] ${TEXT} _(council, cost)_ - remembered on A <!-- dsh-fact id=${sharedFactId(TEXT)} machine=A -->`,
     )
   })
 
@@ -56,12 +61,12 @@ describe('shareFacts', () => {
     const first = shareFacts([entry()], { brainDir: brain, machine: 'A' })
     expect(first).toEqual([{ id: 'mfar', kind: 'decision', body: 'Free seats carry the grunt work. _(swarm)_', machine: 'VMIXER2O2' }])
     shareFacts([entry()], { brainDir: brain, machine: 'A' })
-    const lines = readFileSync(note, 'utf8').split('\n').filter(line => line.includes('id=mlocal'))
+    const lines = readFileSync(note, 'utf8').split('\n').filter(line => line.includes(`id=${sharedFactId(TEXT)}`))
     expect(lines).toHaveLength(1)
   })
 
   it('writes home folders as ~ and keeps an untagged fact plain', () => {
-    const line = factLine(entry({ id: 'mpath', tags: [], text: `Harness at ${join(homedir(), 'Documents')}` }), 'A')
+    const line = factLine(entry({ tags: [], text: `Harness at ${join(homedir(), 'Documents')}` }), 'A')
     expect(line).not.toContain(homedir())
     expect(line).toContain('- [fact] Harness at ~')
     expect(line).not.toContain('_(')
@@ -75,6 +80,27 @@ describe('shareFacts', () => {
 
   it('ignores lines that are not facts', () => {
     expect(parseSharedFacts('# Heading\n\n- a plain bullet\n- [nonsense] x - remembered on A <!-- dsh-fact id=m1 -->\n')).toEqual([])
+  })
+
+  it('keeps one fact to one line however each machine spells its home folder', () => {
+    const here = `The harness is at ${join(homedir(), 'Documents', 'claudecode')}.`
+    const elsewhere = ['The harness is at ~', 'Documents', 'claudecode.'].join('\\')
+    // Same fact, two machines: different raw text, different entry id, and on
+    // the machine that did not write it the text is already normalised.
+    shareFacts([entry({ id: 'mraw', text: here, tags: [] })], { brainDir: brain, machine: 'A' })
+    shareFacts([entry({ id: 'mother', text: elsewhere, tags: [] })], { brainDir: brain, machine: 'B' })
+    const lines = readFileSync(note, 'utf8').split('\n').filter(line => line.includes('The harness is at'))
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain('machine=A')
+  })
+})
+
+describe('sharedFactId', () => {
+  it('is the same for one fact however its home folder is written', () => {
+    const here = `The harness is at ${join(homedir(), 'Documents')}.`
+    const elsewhere = 'The harness is at ~\\Documents.'
+    expect(sharedFactId(here)).toBe(sharedFactId(elsewhere))
+    expect(sharedFactId('a different fact')).not.toBe(sharedFactId(here))
   })
 })
 

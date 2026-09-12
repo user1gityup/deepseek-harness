@@ -25,6 +25,7 @@ export {
   factLine,
   parseSharedFacts,
   shareFacts,
+  sharedFactId,
   withoutHomePaths,
   FACTS_NOTE,
   SHARED_LIMIT,

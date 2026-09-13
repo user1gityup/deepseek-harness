@@ -109,6 +109,7 @@ export function SwarmRoster({ t, settings }: SwarmRosterProps): JSX.Element | nu
           <option value="" disabled>{t('swarm.chooseMode')}</option>
           <option value="economy">{t('swarm.economy')}</option>
           <option value="fastest">{t('swarm.fastest')}</option>
+          <option value="user">{t('swarm.user')}</option>
         </select>
       </label>
       <div className={css.head}>

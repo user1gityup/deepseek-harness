@@ -186,7 +186,7 @@ export interface Config {
    * debate and getting a graph of workers.
    */
   pendingSwarmId?: string
-  swarmProfile?: 'economy' | 'fastest'
+  swarmProfile?: 'economy' | 'fastest' | 'user'
   pendingSwarmProfile?: string
   pipelineProfile?: string
   /** The request that graph serves, shown on the Approve control. */
@@ -428,7 +428,7 @@ export const Config: z<Config> = z.object({
   approvedPlanId: z.string(),
   approvedAt: z.number(),
   pendingSwarmId: z.string(),
-  swarmProfile: z.union(['economy', 'fastest']),
+  swarmProfile: z.union(['economy', 'fastest', 'user']),
   pendingSwarmProfile: z.string(),
   pipelineProfile: z.string(),
   pendingSwarmQuery: z.string(),
@@ -1640,6 +1640,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         })
       }
       const journal = openJournal(state.id)
+      let issuedPipelineGate: { kind: 'council' | 'swarm' | 'propose'; id: string } | undefined
       const result = await withJournal(journal, async () => await runPipeline({
         state,
         sessionPercent: statuslineSessionPercent(),
@@ -1666,10 +1667,13 @@ export function apply(ctx: Context, config: Config = {}): void {
               ...(config.plannerSeat === undefined ? {} : { planner: config.plannerSeat }),
               ...(input.winner === undefined ? {} : { winner: input.winner }),
               ...(input.tasks === undefined || !approved ? {} : { tasks: input.tasks }),
+              ...(input.units === undefined ? {} : { previousResults: input.units }),
             })
             if (swarm.phase === 'plan' && settingsNow.autoApprove !== true) {
+              const issuedId = randomUUID()
+              issuedPipelineGate = { kind: 'swarm', id: issuedId }
               await ctx.settings?.update(COUNCIL_NAMESPACE, {
-                pendingSwarmId: randomUUID(),
+                pendingSwarmId: issuedId,
                 pendingSwarmQuery: swarm.query,
                 pendingSwarmTasks: JSON.stringify(swarm.tasks),
                 pendingSwarmIssuedAt: Date.now(),
@@ -1699,7 +1703,7 @@ export function apply(ctx: Context, config: Config = {}): void {
               failures: swarm.results
                 .filter(unit => unit.error !== undefined)
                 .map(unit => ({ seat: unit.seat, error: String(unit.error) })),
-              ...(swarm.phase === 'blocked' ? { problems: swarm.problems } : {}),
+              ...(swarm.phase === 'blocked' || swarm.phase === 'partial' ? { problems: swarm.problems } : {}),
             }
           }
 
@@ -1733,8 +1737,10 @@ export function apply(ctx: Context, config: Config = {}): void {
               webMaxResults: config.webMaxResults ?? 0,
             })
             if (proposed.phase === 'plan' && settingsNow.autoApprove !== true) {
+              const issuedId = randomUUID()
+              issuedPipelineGate = { kind: 'propose', id: issuedId }
               await ctx.settings?.update(COUNCIL_NAMESPACE, {
-                pendingProposeId: randomUUID(),
+                pendingProposeId: issuedId,
                 pendingProposeTask: proposed.task,
                 pendingProposeRunId: proposed.runId,
                 pendingProposeIssuedAt: Date.now(),
@@ -1780,7 +1786,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           const approved = councilApproved()
           const question = stage === 'review'
             ? [
-              'Review the work below against the original request. Say what is missing, wrong, or unfinished.',
+              'Review the work below against the original request and every acceptance condition. The first line of the collective answer must be exactly ACCEPTED, REWORK REQUIRED, or BLOCKED. Use ACCEPTED only when all required artifacts exist and available verification passed.',
               '',
               `ORIGINAL REQUEST: ${input.query}`,
               '',
@@ -1811,8 +1817,10 @@ export function apply(ctx: Context, config: Config = {}): void {
               : {}),
           })
           if (council.phase === 'plan' && settingsNow.autoApprove !== true) {
+            const issuedId = randomUUID()
+            issuedPipelineGate = { kind: 'council', id: issuedId }
             await ctx.settings?.update(COUNCIL_NAMESPACE, {
-              pendingPlanId: randomUUID(),
+              pendingPlanId: issuedId,
               pendingPlanQuery: question,
               pendingPlanText: council.plan ?? '',
               pendingPlanIssuedAt: Date.now(),
@@ -1832,9 +1840,15 @@ export function apply(ctx: Context, config: Config = {}): void {
               approvedAt: 0,
             } as never)
           }
+          const reviewText = council.answer.trim()
+          const reviewVerdict = stage === 'review'
+            ? (/^ACCEPTED(?:\s|$)/i.test(reviewText) ? 'ACCEPTED' : /^REWORK REQUIRED(?:\s|$)/i.test(reviewText) ? 'REWORK REQUIRED' : 'BLOCKED')
+            : undefined
           return {
             report: renderMarkdown(council),
-            complete: council.phase === 'full',
+            complete: council.phase === 'full' && (stage !== 'review' || reviewVerdict === 'ACCEPTED'),
+            ...(stage === 'review' && council.phase === 'full' && reviewVerdict === 'REWORK REQUIRED' ? { rework: true } : {}),
+            ...(stage === 'review' && council.phase === 'full' && reviewVerdict === 'BLOCKED' ? { problems: ['Final review returned BLOCKED or no valid verdict.'] } : {}),
             ...(council.plan === undefined ? {} : { plan: council.plan }),
             // Only the deciding stage names a winner. The review stage runs the
             // same tool and elects its own, and letting that through would
@@ -1857,6 +1871,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       const reused = journal === undefined || journal.hits === 0
         ? ''
         : `\n\n_Resumed: ${String(journal.hits)} seat answer(s) came back from this run's journal — not asked or paid for again._`
+      const gateMarker = issuedPipelineGate === undefined
+        ? ''
+        : `\n\n<!--${issuedPipelineGate.kind}-plan:${issuedPipelineGate.id}-->`
 
       // Stopped from the panel while this stage ran: the stop already cleared
       // the run, and writing it back would undo that.
@@ -1892,12 +1909,12 @@ export function apply(ctx: Context, config: Config = {}): void {
         pipelineHoldSource: result.state.hold?.source ?? '',
       } as never)
 
-      process.stdout.write(`${result.report}${reused}${String.fromCharCode(10)}`)
+      process.stdout.write(`${result.report}${reused}${gateMarker}${String.fromCharCode(10)}`)
       return {
         query: result.state.query,
         stage: result.state.stage,
         phase: result.phase,
-        report: `${result.report}${reused}`,
+        report: `${result.report}${reused}${gateMarker}`,
         ...(result.state.hold === undefined ? {} : { resumeAt: result.state.hold.resumeAt }),
       }
     },

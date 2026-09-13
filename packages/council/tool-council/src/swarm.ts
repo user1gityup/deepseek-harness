@@ -48,7 +48,7 @@ export interface SwarmOverride {
 
 /** Everything one swarm run needs. */
 export interface SwarmRunOptions {
-  readonly profile?: 'economy' | 'fastest' | undefined
+  readonly profile?: 'economy' | 'fastest' | 'user' | undefined
   readonly picked?: string | undefined
   readonly workRoot?: string | undefined
   readonly writes?: WriteSeam | undefined
@@ -104,6 +104,10 @@ export interface SwarmRunOptions {
   readonly files?: FileSeam | undefined
   /** Absolute directories a unit may be shown files from. */
   readonly fileRoots?: readonly string[] | undefined
+  /** Results already completed by an interrupted attempt. Successful units are never asked again. */
+  readonly previousResults?: readonly SwarmUnitResult[] | undefined
+  /** Optional product verification supplied by the host or a focused test. */
+  readonly verifyUnit?: ((result: SwarmUnitResult) => Promise<readonly string[]>) | undefined
 }
 
 /** What one worker did with one unit. */
@@ -126,6 +130,8 @@ export type SwarmPhase =
   | 'blocked'
   /** Units ran. */
   | 'full'
+  /** Some work landed, but failed/missing/unverified units remain resumable. */
+  | 'partial'
 
 /** The outcome of one swarm run. */
 export interface SwarmResult {
@@ -317,7 +323,7 @@ async function decompose(
 ): Promise<{ tasks: readonly SubTask[]; problems: readonly string[] }> {
   const reply = await askSeat(
     planner,
-    directDecomposePrompt(options.query, enabled.map(worker => worker.provider), options.profile),
+    directDecomposePrompt(options.query, enabled.map(worker => worker.provider), options.profile === 'user' ? undefined : options.profile),
     options.apiKey,
     options.signal,
     options.timeoutMs,
@@ -378,9 +384,9 @@ export async function runSwarm(options: SwarmRunOptions): Promise<SwarmResult> {
   // would pile second-order complaints onto a shape that never formed.
   const graphProblems = [
     ...decomposition.problems,
-    ...(decomposition.problems.length === 0 ? validateGraph(decomposition.tasks, options.profile) : []),
+    ...(decomposition.problems.length === 0 ? validateGraph(decomposition.tasks, options.profile === 'user' ? undefined : options.profile) : []),
   ]
-  if (options.profile !== undefined) {
+  if (options.profile !== undefined && options.profile !== 'user') {
     for (const task of decomposition.tasks) {
       const matching = fullRoster.filter(worker => worker.enabled && (worker.kinds.includes('any') || worker.kinds.includes(inferKind(task))))
       if (!fullRoster.some(worker => worker.enabled && worker.costClass !== 'free' && (worker.kinds.includes('any') || worker.kinds.includes('review')))) graphProblems.push(`unit ${task.id} requires an enabled paid reviewer`)
@@ -465,7 +471,7 @@ export async function runSwarm(options: SwarmRunOptions): Promise<SwarmResult> {
       assignments: plan.assignments,
       estimate,
       report: planReport(options.query, decomposition.tasks, plan.assignments, estimate, false)
-        + (options.profile === undefined ? '' : `\n\nMode: ${options.profile}. ${options.profile === 'economy' ? 'Every unit is contested by all eligible free seats; one candidate and one selection call per free seat, with at most one paid fallback candidate and two paid reviews per unit.' : 'One paid candidate and one paid review per unit, with independent units run in parallel.'} Each candidate may make one additional call to read source. The estimate includes those calls. Economy can be slow; free seats may take 420 seconds per call. Candidate files stay in staging.`),
+        + (options.profile === undefined || options.profile === 'user' ? '' : `\n\nMode: ${options.profile}. ${options.profile === 'economy' ? 'Every unit is contested by all eligible free seats; one candidate and one selection call per free seat, with at most one paid fallback candidate and two paid reviews per unit.' : 'One paid candidate and one paid review per unit, with independent units run in parallel.'} Each candidate may make one additional call to read source. The estimate includes those calls. Economy can be slow; free seats may take 420 seconds per call. Candidate files stay in staging.`),
     }
   }
 
@@ -473,11 +479,15 @@ export async function runSwarm(options: SwarmRunOptions): Promise<SwarmResult> {
   // by construction, so they go together; the next wave waits, because its
   // units were declared to need what this one produced.
   const bySeat = new Map(options.seats.map(seat => [seat.id, seat]))
-  const done: SwarmUnitResult[] = []
+  const taskIds = new Set(decomposition.tasks.map(task => task.id))
+  const done: SwarmUnitResult[] = (options.previousResults ?? [])
+    .filter(result => taskIds.has(result.task.id) && result.error === undefined && result.text.trim() !== '')
   for (const wave of executionWaves(decomposition.tasks)) {
     const started = done.slice()
+    const pending = wave.filter(task => !done.some(
+      result => result.task.id === task.id && result.error === undefined))
     const batch = await fanOut(
-      wave.map(task => async (): Promise<SwarmUnitResult> => {
+      pending.map(task => async (): Promise<SwarmUnitResult> => {
         const failedDependency = started.find(unit => task.dependsOn.includes(unit.task.id) && unit.error !== undefined)
         if (failedDependency !== undefined) return { task, seat: '', text: '', error: `dependency ${failedDependency.task.id} failed`, ms: 0 }
         const assignment = plan.assignments.find(entry => entry.task.id === task.id)
@@ -486,7 +496,7 @@ export async function runSwarm(options: SwarmRunOptions): Promise<SwarmResult> {
         if (seat === undefined) {
           return { task, seat: seatId, text: '', error: `no seat "${seatId}"`, ms: 0 }
         }
-        if (options.profile !== undefined) {
+        if (options.profile !== undefined && options.profile !== 'user') {
           const eligible = fullRoster.filter(worker => worker.enabled)
           return await runUnitContest(options, task, started, eligible, seat)
         }
@@ -525,24 +535,37 @@ export async function runSwarm(options: SwarmRunOptions): Promise<SwarmResult> {
             }
           }
         }
-        return {
+        let result: SwarmUnitResult = {
           task,
           seat: seatId,
           text: unit.text,
           ...unit.error === undefined ? {} : { error: unit.error },
           ms: unit.ms,
         }
+        if (result.error === undefined && options.verifyUnit !== undefined) {
+          const failures = await options.verifyUnit(result)
+          if (failures.length > 0) result = { ...result, error: `verification failed: ${failures.join('; ')}` }
+        }
+        return result
       }),
       options.sequential === true,
     )
     done.push(...batch)
   }
 
+  const byTask = new Map(done.map(result => [result.task.id, result]))
+  const remaining = decomposition.tasks.flatMap((task) => {
+    const result = byTask.get(task.id)
+    if (result === undefined) return [`unit ${task.id} did not run`]
+    if (result.error !== undefined) return [`unit ${task.id}: ${result.error}`]
+    if (result.text.trim() === '') return [`unit ${task.id} returned no artifact`]
+    return []
+  })
   return {
-    phase: 'full',
+    phase: remaining.length === 0 ? 'full' : 'partial',
     query: options.query,
     tasks: decomposition.tasks,
-    problems: [],
+    problems: remaining,
     assignments: plan.assignments,
     estimate,
     results: done,

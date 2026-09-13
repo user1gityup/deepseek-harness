@@ -10,6 +10,12 @@ export type BudgetKey =
   | 'seats.model'
   | 'seats.modelAuto'
   | 'seats.modelDefault'
+  | 'seats.selectAll'
+  | 'seats.clearAll'
+  | 'seats.selectProvider'
+  | 'seats.clearProvider'
+  | 'seats.unavailable'
+  | 'seats.antigravityIdeOnly'
   | 'capacity.title'
   | 'capacity.perRun'
   | 'capacity.runsMonth'
@@ -55,6 +61,7 @@ export type BudgetKey =
   | 'swarm.chooseMode'
   | 'swarm.economy'
   | 'swarm.fastest'
+  | 'swarm.user'
   | 'swarm.subscription'
   | 'swarm.free'
   | 'swarm.metered'
@@ -92,6 +99,12 @@ export const en: Record<BudgetKey, string> = {
   'seats.model': 'model',
   'seats.modelAuto': 'Rolling free (auto-routed)',
   'seats.modelDefault': 'Codex default (config.toml)',
+  'seats.selectAll': 'Select all',
+  'seats.clearAll': 'Clear all',
+  'seats.selectProvider': 'Select provider',
+  'seats.clearProvider': 'Clear provider',
+  'seats.unavailable': 'unavailable',
+  'seats.antigravityIdeOnly': 'Available in the Antigravity IDE; its headless agentapi does not expose this Claude/GPT tier to DSH.',
   'capacity.title': 'Capacity',
   'capacity.perRun': 'Est. cost per full run',
   'capacity.runsMonth': 'Runs per month at budget',
@@ -150,6 +163,7 @@ export const en: Record<BudgetKey, string> = {
   'swarm.chooseMode': 'Choose mode',
   'swarm.economy': 'Economy — free contestants, paid review',
   'swarm.fastest': 'Fastest — paid workers in parallel',
+  'swarm.user': 'User selected — you pick who does what',
   'swarm.subscription': 'subscription',
   'swarm.free': 'free',
   'swarm.metered': 'metered',
@@ -173,6 +187,12 @@ export const zh: Record<BudgetKey, string> = {
   'seats.model': '模型',
   'seats.modelAuto': '免费轮换（自动路由）',
   'seats.modelDefault': 'Codex 默认（config.toml）',
+  'seats.selectAll': '全选',
+  'seats.clearAll': '全部清除',
+  'seats.selectProvider': '选择提供方',
+  'seats.clearProvider': '清除提供方',
+  'seats.unavailable': '不可用',
+  'seats.antigravityIdeOnly': 'Antigravity IDE 中可用；其无头 agentapi 尚未向 DSH 暴露此 Claude/GPT 层级。',
   'capacity.title': '容量',
   'capacity.perRun': '每次完整运行的预估成本',
   'capacity.runsMonth': '按预算每月可运行次数',
@@ -231,6 +251,7 @@ export const zh: Record<BudgetKey, string> = {
   'swarm.chooseMode': '选择模式',
   'swarm.economy': '经济模式 — 免费竞争，付费审查',
   'swarm.fastest': '最快模式 — 付费工作者并行执行',
+  'swarm.user': '用户选择 — 您决定谁做什么',
   'swarm.subscription': '订阅',
   'swarm.free': '免费',
   'swarm.metered': '按量计费',

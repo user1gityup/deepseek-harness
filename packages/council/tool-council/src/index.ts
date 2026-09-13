@@ -13,6 +13,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { randomUUID } from 'node:crypto'
 import { judgeApproval, planExpired } from './approval.ts'
 import { failedSeats, isAmendable, latestRun, loadRun, newRunId, saveRun } from './runs.ts'
+import { discardJournal, journalIdFor, openJournal, resumedNote, withJournal } from './journal.ts'
 import type { RunRecord } from './runs.ts'
 import { describeError } from './errors.ts'
 import type {} from '@deepseek-ai/dsh-web'
@@ -31,7 +32,7 @@ import { quotaReading, readClaudeUsage, startOfDay, startOfWeek } from './usage.
 import { resolveOpenRouterKey, DEFAULT_KEY_ENV } from './credentials.ts'
 import { listPresets, removePreset, renderPresets, savePreset } from './presets.ts'
 import type { PresetMap } from './presets.ts'
-import { ALL_PIPELINE_STAGES, parseStages, runPipeline, stagesOf, startPipeline } from './pipeline.ts'
+import { ALL_PIPELINE_STAGES, parseStages, runPipeline, stagesOf, startPipeline, stoppedDuring } from './pipeline.ts'
 import type { PipelineCandidate, StageInput } from './pipeline.ts'
 import type { PipelineStage, PipelineState } from './pipeline.ts'
 import { amendCouncil, runCouncil } from './council.ts'
@@ -44,6 +45,7 @@ import { renderMarkdown } from './markdown.ts'
 import { renderReport } from './report.ts'
 import { DEFAULT_SEATS } from './seats.ts'
 import type { SeatConfig } from './seats.ts'
+import { readCodexModels } from './codex-models.ts'
 
 /** Cordis plugin name. */
 export const name = 'tool-council'
@@ -92,7 +94,11 @@ export interface SeatOverride {
   command?: string
   /** CLI seats: argv template; `{prompt}` is replaced with the prompt. */
   args?: string[]
-  /** OpenRouter seats: model identifier to request. */
+  /**
+   * Model identifier to request. OpenRouter seats send it as the request's
+   * model; a CLI seat with a model flag (Codex: `-m`) passes it on the command
+   * line. Empty means the seat's own default.
+   */
   model?: string
   /**
    * OpenRouter seats: chat-completions endpoint, overriding OpenRouter's own.
@@ -234,6 +240,12 @@ export interface Config {
   /** Set while a run should advance itself; written by the control that fired a preset. */
   pipelineAuto?: boolean
   pipelineId?: string
+  /**
+   * Id of the run the panel's Stop cleared. A stage already in flight when
+   * Stop is pressed checks this before writing its state back, so the run it
+   * belonged to stays stopped instead of reappearing when the stage returns.
+   */
+  pipelineStoppedId?: string
   /** The request the whole chain serves, in the user's own words. */
   pipelineQuery?: string
   /** Which stage the next call runs. */
@@ -365,6 +377,11 @@ export interface Config {
    */
   observedCliTokensPerWeek?: number
   /**
+   * Model ids the local Codex CLI lists, read from its model cache. Written by
+   * this plugin so the browser panel can offer them for the Codex seat.
+   */
+  codexModels?: string[]
+  /**
    * Shared-memory digest handed to every seat. Defaults to the agent-memory
    * plugin's digest; set false to run the council without that digest.
    */
@@ -428,6 +445,7 @@ export const Config: z<Config> = z.object({
   })).default({}),
   pipelineAuto: z.boolean().default(false),
   pipelineId: z.string(),
+  pipelineStoppedId: z.string(),
   pipelineQuery: z.string(),
   pipelineStage: z.string(),
   pipelineStages: z.string(),
@@ -466,6 +484,7 @@ export const Config: z<Config> = z.object({
   dailyClaudeTokens: z.number(),
   subscriptionUsdPerSeat: z.number().default(20),
   observedCliTokensPerWeek: z.number(),
+  codexModels: z.array(z.string()),
   memoryDigest: z.union([z.string(), z.const(false)]),
   brainIndex: z.union([z.string(), z.const(false)]),
 })
@@ -607,7 +626,9 @@ export function resolveSeats(
       // asking for an argument-less command. Treat it as unset, or a seat
       // toggled in the UI would spawn its command with no prompt at all.
       args: override.args !== undefined && override.args.length > 0 ? override.args : seat.args,
-      model: override.model ?? seat.model,
+      // Empty is how the panel says "the seat's default": the shipped model for
+      // a hosted seat, the CLI's own configured model for a CLI seat.
+      model: override.model !== undefined && override.model !== '' ? override.model : seat.model,
       // Same reasoning as `args`: an empty string is the schema's materialised
       // default, not a request to call the empty URL.
       baseUrl: override.baseUrl !== undefined && override.baseUrl !== '' ? override.baseUrl : seat.baseUrl,
@@ -807,6 +828,19 @@ export function apply(ctx: Context, config: Config = {}): void {
     } catch {
       // A read-only settings provider is a supported deployment; the panel
       // simply falls back to treating subscription seats as unpriced.
+    }
+  })()
+
+  // Publish the Codex CLI's model list so the panel can offer a model for the
+  // Codex seat. Written only when it changed, for the same reason as above.
+  void (async () => {
+    const models = readCodexModels()
+    if (models.length === 0) return
+    if (JSON.stringify(models) === JSON.stringify(live().codexModels ?? [])) return
+    try {
+      await ctx.settings?.update(COUNCIL_NAMESPACE, { codexModels: models })
+    } catch {
+      // Read-only settings: the panel offers only Codex's configured default.
     }
   })()
 
@@ -1051,7 +1085,17 @@ export function apply(ctx: Context, config: Config = {}): void {
       })
       const memory = resolveMemory(live().memoryDigest, live().brainIndex)
       const active = currentSeats()
-      const result = await runCouncil({
+      // Once approved, run the question the plan was written for. The follow-up
+      // turn that satisfies the verbal factor is usually just "go", and passing
+      // that as the query would answer the wrong thing.
+      const councilQuestion = !autoApproved && approval.allowed && settingsNow.pendingPlanQuery !== undefined && settingsNow.pendingPlanQuery !== ''
+        ? settingsNow.pendingPlanQuery
+        : args.query
+      // This run has no id until it is filed, and a run cut off before that
+      // is re-called with the same question. Journalled under that question,
+      // the re-call gets back every answer the aborted run had already paid for.
+      const journal = openJournal(journalIdFor(councilQuestion))
+      const result = await withJournal(journal, async () => await runCouncil({
         memory,
         // Tool-less seats get one shared search instead of each inventing
         // citations. The seam's router prefers a subscription route, so this
@@ -1066,12 +1110,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           const line = `  [${event.round}] ${event.name} ${String(event.ms)}ms${cost}${running}${status}`
           process.stdout.write(`${event.ok ? livePalette.seat(event.seat, line) : livePalette.failure(line)}\n`)
         },
-        // Once approved, run the question the plan was written for. The
-        // follow-up turn that satisfies the verbal factor is usually just
-        // "go", and passing that as the query would answer the wrong thing.
-        query: !autoApproved && approval.allowed && settingsNow.pendingPlanQuery !== undefined && settingsNow.pendingPlanQuery !== ''
-          ? settingsNow.pendingPlanQuery
-          : args.query,
+        query: councilQuestion,
         seats: active,
         apiKey,
         signal: exec.signal,
@@ -1098,7 +1137,10 @@ export function apply(ctx: Context, config: Config = {}): void {
           monthlyUsd: config.monthlyBudgetUsd ?? 20,
         },
         ...(config.plannerSeat === undefined ? {} : { plannerSeat: config.plannerSeat }),
-      })
+      }))
+      // A finished run is filed below and amended through its record, so its
+      // journal has done its job.
+      if (result.phase === 'full' && journal !== undefined) discardJournal(journal.runId)
 
       // The estimate is only meaningful at the planning gate: past that point
       // the money is already committed.
@@ -1243,7 +1285,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         ...(result.verdict.winner === undefined ? {} : { winner: result.verdict.winner }),
         method: result.verdict.method,
         tied: result.verdict.tied,
-        report: plain,
+        report: `${plain}${resumedNote(journal)}`,
         ...(issuedPlanId === undefined ? {} : { planId: issuedPlanId }),
         failures,
       }
@@ -1572,7 +1614,33 @@ export function apply(ctx: Context, config: Config = {}): void {
         lastUserTurnAt,
       }).allowed
 
-      const result = await runPipeline({
+      // A new run is written down BEFORE its first stage spends anything. The
+      // state used to reach settings only when a stage returned, so a stage cut
+      // off part way left no run behind at all — nothing to continue, and every
+      // answer already paid for was gone. With the id recorded first, an
+      // aborted stage shows as a run in progress, Continue re-enters the same
+      // stage under the same id, and the journal hands back what was answered.
+      if (!running || args.restart === true) {
+        if (running) discardJournal(settingsNow.pipelineId ?? '')
+        await ctx.settings.update(COUNCIL_NAMESPACE, {
+          pipelineId: state.id,
+          pipelineQuery: state.query,
+          pipelineStage: state.stage,
+          pipelineStages: stagesOf(state).join(','),
+          pipelinePlan: '',
+          pipelineWinner: '',
+          pipelineProfile: profile ?? '',
+          pipelineTasks: '',
+          pipelineUnits: '',
+          pipelineCandidates: '',
+          pipelineHoldDetail: '',
+          pipelineHoldSeat: '',
+          pipelineHoldResumeAt: 0,
+          pipelineHoldSource: '',
+        })
+      }
+      const journal = openJournal(state.id)
+      const result = await withJournal(journal, async () => await runPipeline({
         state,
         sessionPercent: statuslineSessionPercent(),
         async runStage(stage, input) {
@@ -1783,7 +1851,23 @@ export function apply(ctx: Context, config: Config = {}): void {
             ],
           }
         },
-      })
+      }))
+      // Finished: nothing will resume this run, so its journal goes with it.
+      if (result.phase === 'done') discardJournal(state.id)
+      const reused = journal === undefined || journal.hits === 0
+        ? ''
+        : `\n\n_Resumed: ${String(journal.hits)} seat answer(s) came back from this run's journal — not asked or paid for again._`
+
+      // Stopped from the panel while this stage ran: the stop already cleared
+      // the run, and writing it back would undo that.
+      if (stoppedDuring(result.state.id, live().pipelineStoppedId)) {
+        return {
+          query: result.state.query,
+          stage: result.state.stage,
+          phase: 'blocked',
+          report: `${result.report}\n\n---\n**Stopped:** this run was stopped from the pipeline panel while the stage ran. Nothing further is recorded.`,
+        }
+      }
 
       // The run IS the settings: every call writes it back, the hold included.
       // That is what lets a resumed session pick the same stage up rather than
@@ -1808,12 +1892,12 @@ export function apply(ctx: Context, config: Config = {}): void {
         pipelineHoldSource: result.state.hold?.source ?? '',
       } as never)
 
-      process.stdout.write(`${result.report}${String.fromCharCode(10)}`)
+      process.stdout.write(`${result.report}${reused}${String.fromCharCode(10)}`)
       return {
         query: result.state.query,
         stage: result.state.stage,
         phase: result.phase,
-        report: result.report,
+        report: `${result.report}${reused}`,
         ...(result.state.hold === undefined ? {} : { resumeAt: result.state.hold.resumeAt }),
       }
     },

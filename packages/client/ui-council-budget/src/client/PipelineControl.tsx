@@ -96,6 +96,47 @@ export const RESTART_PROMPT = 'Restart the pipeline: call the pipeline tool with
 export const CONTINUE_PROMPT = 'Continue the pipeline — call the pipeline tool again to advance the next stage.'
 
 /**
+ * Every key a stop writes, in write order, with the value that clears it.
+ *
+ * Stop is a settings write, not a prompt: a prompt asks the model to end the
+ * run, and a model mid-turn or out of quota cannot, which is how a stopped run
+ * used to leave the panel with no way back to the saved runs. `pipelineStoppedId`
+ * goes first so a stage still in flight sees the stop before `pipelineId`
+ * clears. Pending gates are retired too — a stopped run's Approve would
+ * otherwise sit on the strip authorising a stage nothing will ask for.
+ * Nothing here approves or spends: every value revokes.
+ * @param id - the run being stopped.
+ * @returns field/value pairs.
+ */
+export function stopWrites(id: string): readonly (readonly [string, unknown])[] {
+  return [
+    ['pipelineStoppedId', id],
+    ['pipelineAuto', false],
+    ['pipelineId', ''],
+    ['pipelineQuery', ''],
+    ['pipelineStage', ''],
+    ['pipelineStages', ''],
+    ['pipelinePlan', ''],
+    ['pipelineWinner', ''],
+    ['pipelineProfile', ''],
+    ['pipelineTasks', ''],
+    ['pipelineUnits', ''],
+    ['pipelineCandidates', ''],
+    ['pipelinePicked', ''],
+    ['pipelineHoldDetail', ''],
+    ['pipelineHoldSeat', ''],
+    ['pipelineHoldResumeAt', 0],
+    ['pipelineHoldSource', ''],
+    ['pendingProposeId', ''],
+    ['approvedProposeId', ''],
+    ['pendingSwarmId', ''],
+    ['approvedSwarmId', ''],
+    ['pendingPlanId', ''],
+    ['approvedPlanId', ''],
+  ]
+}
+
+/**
  * The area half of a preset id.
  *
  * Ids are `area/name` — `dsh/gate-audit`, `web/ship-landing`. The area is what
@@ -312,6 +353,30 @@ export function PipelineControl({ t, settings, send }: PipelineControlProps): JS
     if (picked !== '' && chosen === undefined) setPicked('')
   }, [picked, chosen])
 
+  // Stop: clear the run in settings directly, so the panel drops back to the
+  // saved runs even when the session cannot take a prompt. The pick and the
+  // advance ref reset so the next run starts clean.
+  const stop = (): void => {
+    const id = typeof section?.['pipelineId'] === 'string' ? section['pipelineId'] : ''
+    setFailure('')
+    advanced.current = ''
+    fired.current = resumeAt
+    setPicked('')
+    // Each write stands alone: a host older than `pipelineStoppedId` refuses
+    // that one key, and the run must still clear. The first refusal is shown.
+    void (async () => {
+      let first = ''
+      for (const [field, value] of stopWrites(id)) {
+        try {
+          await settings.set(field, value)
+        } catch (error) {
+          if (first === '') first = error instanceof Error ? error.message : String(error)
+        }
+      }
+      if (first !== '') setFailure(first)
+    })()
+  }
+
   const index = order.indexOf(stage)
   const position = index < 0 ? 1 : index + 1
   const total = order.length
@@ -393,6 +458,13 @@ export function PipelineControl({ t, settings, send }: PipelineControlProps): JS
             >
               {t('pipeline.resumeNow')}
             </button>
+            <button
+              type="button"
+              className={`${css.action} ${css.stop}`}
+              onClick={() => { stop() }}
+            >
+              {t('pipeline.stop')}
+            </button>
           </div>
         )
         : null}
@@ -418,6 +490,13 @@ export function PipelineControl({ t, settings, send }: PipelineControlProps): JS
               onClick={() => { void go(RESTART_PROMPT) }}
             >
               {t('pipeline.restart')}
+            </button>
+            <button
+              type="button"
+              className={`${css.action} ${css.stop}`}
+              onClick={() => { stop() }}
+            >
+              {t('pipeline.stop')}
             </button>
             <span className={css.query} title={query}>{query}</span>
           </div>

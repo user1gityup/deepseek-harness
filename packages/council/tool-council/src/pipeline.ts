@@ -453,3 +453,19 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     ].join('\n'),
   }
 }
+
+/**
+ * Whether the run a stage belongs to was stopped from the panel while the
+ * stage was running.
+ *
+ * The panel's Stop clears the run in settings and records its id. A stage
+ * already in flight returns afterwards and would write its state back, which
+ * brings the stopped run back to life and hides the saved runs again. Checked
+ * against settings read AFTER the stage, never the snapshot taken before it.
+ * @param runId - the id of the run this call advanced.
+ * @param stoppedId - `pipelineStoppedId` as it stands now.
+ * @returns true when the write-back must be skipped.
+ */
+export function stoppedDuring(runId: string, stoppedId: string | undefined): boolean {
+  return runId !== '' && stoppedId !== undefined && stoppedId === runId
+}

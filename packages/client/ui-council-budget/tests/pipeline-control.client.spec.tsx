@@ -23,6 +23,11 @@ const COPY: Record<string, string> = {
   'pipeline.title': 'Pipeline',
   'pipeline.hint': 'hint',
   'pipeline.run': 'Run pipeline',
+  'pipeline.stop': 'Stop run',
+  'pipeline.restart': 'Start over',
+  'pipeline.continue': 'Continue',
+  'pipeline.resumeNow': 'Resume now',
+  'pipeline.held': 'Held',
   'pipeline.presets': 'Saved runs',
   'pipeline.placeholder': 'What should the chain work on?',
   'pipeline.failed': 'The prompt did not reach the session — nothing was sent. Reason:',
@@ -97,6 +102,68 @@ async function pickAndRun(): Promise<void> {
     await Promise.resolve()
   })
 }
+
+/**
+ * Mount the control over a section of the caller's choosing.
+ * @param section - the council settings section.
+ * @param send - the send face.
+ * @returns the recorded settings writes.
+ */
+function mountWith(section: Record<string, unknown>, send: (text: string) => Promise<void>) {
+  const { face, writes } = scope({ pipelineMinimizeStyle: 'off', ...section })
+  const props = {
+    useSessions: emptySessions(),
+    useWorkspaces: emptyWorkspaces(),
+    t: (key: string) => COPY[key] ?? key,
+    settings: face,
+    send,
+  } as unknown as PipelineControlProps
+  render(<PipelineControl {...props} />)
+  return { writes }
+}
+
+const RUNNING = {
+  pipelinePresets: { 'dsh/demo': { name: 'Demo run', query: 'do the thing', autoAdvance: true } },
+  pipelineId: 'run-1',
+  pipelineQuery: 'do the thing',
+  pipelineStage: 'swarm',
+  pipelinePlan: 'the approach',
+  pendingSwarmId: 'gate-1',
+}
+
+describe('PipelineControl stop', () => {
+  it('offers Stop on a running run and clears it without sending a prompt', async () => {
+    const send = vi.fn(async (_text: string) => {})
+    const { writes } = mountWith(RUNNING, send)
+    // A running run hides the saved runs; Stop is the way back.
+    expect(screen.queryByRole('button', { name: /Demo run/ })).toBeNull()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Stop run' }))
+      await Promise.resolve()
+    })
+
+    expect(send).not.toHaveBeenCalled()
+    expect(writes[0]).toEqual(['pipelineStoppedId', 'run-1'])
+    expect(writes).toContainEqual(['pipelineId', ''])
+    expect(writes).toContainEqual(['pipelineAuto', false])
+    expect(writes).toContainEqual(['pipelineHoldResumeAt', 0])
+    expect(writes).toContainEqual(['pendingSwarmId', ''])
+    // Revokes only: no approval slot is ever given a value.
+    expect(writes.filter(([field]) => field.startsWith('approved')).every(([, value]) => value === '')).toBe(true)
+  })
+
+  it('offers Stop on a held run, which otherwise only offers Resume now', () => {
+    mountWith({ ...RUNNING, pipelineHoldResumeAt: Date.now() + 600_000 }, vi.fn(async () => {}))
+    expect(screen.getAllByRole('button', { name: 'Stop run' }).length).toBeGreaterThan(0)
+  })
+
+  it('shows the saved runs again once the run is cleared', () => {
+    mountWith({ ...RUNNING, pipelineId: '' }, vi.fn(async () => {}))
+    expect(screen.getByRole('button', { name: /Demo run/ })).not.toBeNull()
+    expect(screen.queryByRole('button', { name: 'Stop run' })).toBeNull()
+  })
+})
 
 describe('PipelineControl send failures', () => {
   it('shows the reason when the session refuses the prompt', async () => {

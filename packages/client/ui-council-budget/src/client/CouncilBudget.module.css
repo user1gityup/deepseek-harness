@@ -96,6 +96,23 @@ label.row { cursor: pointer; }
   color: var(--dsw-alias-label-secondary);
 }
 
+/* ── Per-seat model choice ──────────────────────────── */
+
+.modelRow {
+  padding: 0 0 4px 21px;
+}
+
+.modelSelect {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 3px 6px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-3);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 4px;
+}
+
 /* ── Add an OpenRouter seat ─────────────────────────── */
 
 .addRow {

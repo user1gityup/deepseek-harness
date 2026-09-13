@@ -67,6 +67,13 @@
   opacity: 0.5;
 }
 
+/* Stop ends the run and hands the panel back to the saved runs. Red because it
+   discards the stored plan and graph; the word carries it without colour. */
+.stop {
+  color: var(--dsw-alias-state-error-primary);
+  border-color: var(--dsw-alias-state-error-secondary);
+}
+
 .stage {
   font-weight: 600;
 }

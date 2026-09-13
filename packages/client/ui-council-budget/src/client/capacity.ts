@@ -70,7 +70,10 @@ export function seatsFrom(section: Record<string, unknown> | undefined): readonl
   const base = DEFAULT_SEATS.map(seat => ({
     ...seat,
     enabled: overrides[seat.id]?.enabled ?? seat.enabled,
-    model: overrides[seat.id]?.model ?? seat.model,
+    // Empty means the seat's default, as the host's resolveSeats reads it.
+    model: overrides[seat.id]?.model === undefined || overrides[seat.id]?.model === ''
+      ? seat.model
+      : overrides[seat.id]?.model,
     free: overrides[seat.id]?.free ?? seat.free,
   }))
   const added: PanelSeat[] = Object.entries(extras).map(([id, extra]) => ({
@@ -82,6 +85,37 @@ export function seatsFrom(section: Record<string, unknown> | undefined): readonl
     enabled: extra.enabled ?? true,
   }))
   return [...base, ...added]
+}
+
+/** One row of OpenRouter's public `/models` listing, as far as the panel reads it. */
+export interface ModelRow {
+  readonly id?: string
+  readonly pricing?: { readonly prompt?: string; readonly completion?: string }
+  readonly architecture?: { readonly input_modalities?: readonly string[]; readonly output_modalities?: readonly string[] }
+}
+
+/**
+ * The free chat models the OpenRouter free proxy can be pinned to.
+ *
+ * The same filter the proxy applies to build its pool — zero prompt and
+ * completion price, text in, text only out — so every id offered here is one
+ * the proxy accepts. A zero-priced media model is left out: the proxy refuses
+ * it, and routed to one a question comes back as a refusal.
+ * @param rows - OpenRouter's model listing.
+ * @returns model ids in listing order.
+ */
+export function freeChatModelIds(rows: readonly ModelRow[]): string[] {
+  const ids: string[] = []
+  for (const row of rows) {
+    if (typeof row.id !== 'string') continue
+    if (Number(row.pricing?.prompt) !== 0 || Number(row.pricing?.completion) !== 0) continue
+    if (row.pricing?.prompt === undefined || row.pricing.completion === undefined) continue
+    const input = row.architecture?.input_modalities ?? ['text']
+    const output = row.architecture?.output_modalities ?? ['text']
+    if (!input.includes('text') || output.length !== 1 || output[0] !== 'text') continue
+    ids.push(row.id)
+  }
+  return ids
 }
 
 /** Per-token prices for one model. */

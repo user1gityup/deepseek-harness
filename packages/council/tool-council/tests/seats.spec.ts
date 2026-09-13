@@ -84,6 +84,35 @@ describe('askCliSeat prompt delivery', () => {
   })
 })
 
+describe('askCliSeat model selection', () => {
+  it('passes the chosen model through the seat\'s model flag, before the prompt', async () => {
+    const seen = await invoke(reporterSeat({ modelFlag: '-m', model: 'gpt-5.5' }), 'a short question')
+    expect(seen.args).toEqual(['flag', '-m', 'gpt-5.5', 'a short question'])
+  })
+
+  it('keeps the model flag when the prompt moves to stdin', async () => {
+    const seen = await invoke(reporterSeat({ modelFlag: '-m', model: 'gpt-5.5', stdinPromptArg: '-' }), HUGE)
+    expect(seen.args).toEqual(['flag', '-m', 'gpt-5.5', '-'])
+    expect(seen.stdin).toBe(HUGE)
+  })
+
+  it('leaves the CLI on its own default when no model is chosen', async () => {
+    const seen = await invoke(reporterSeat({ modelFlag: '-m', model: '' }), 'a short question')
+    expect(seen.args).toEqual(['flag', 'a short question'])
+  })
+
+  it('ignores a model on a CLI seat that declares no flag', async () => {
+    const seen = await invoke(reporterSeat({ model: 'gpt-5.5' }), 'a short question')
+    expect(seen.args).toEqual(['flag', 'a short question'])
+  })
+
+  it('ships the codex seat with -m and no pinned model', () => {
+    const codex = DEFAULT_SEATS.find(seat => seat.id === 'openai')
+    expect(codex?.modelFlag).toBe('-m')
+    expect(codex?.model).toBeUndefined()
+  })
+})
+
 describe('shipped seat defaults', () => {
   it('gives codex the stdin token it needs and claude none', () => {
     const codex = DEFAULT_SEATS.find(seat => seat.id === 'openai')

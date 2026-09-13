@@ -203,6 +203,18 @@ describe('seat resolution', () => {
   it('can disable one seat', () => {
     expect(resolveSeats({ openai: { enabled: false } }).find(seat => seat.id === 'openai')?.enabled).toBe(false)
   })
+
+  it('gives the Codex seat a chosen model and keeps its model flag', () => {
+    const codex = resolveSeats({ openai: { model: 'gpt-5.5' } }).find(seat => seat.id === 'openai')
+    expect(codex?.model).toBe('gpt-5.5')
+    expect(codex?.modelFlag).toBe('-m')
+  })
+
+  it('reads an empty model override as the seat default', () => {
+    const seats = resolveSeats({ 'openrouter-free': { model: '' }, openai: { model: '' } })
+    expect(seats.find(seat => seat.id === 'openrouter-free')?.model).toBe('proxy-auto')
+    expect(seats.find(seat => seat.id === 'openai')?.model).toBeUndefined()
+  })
 })
 
 describe('report rendering', () => {

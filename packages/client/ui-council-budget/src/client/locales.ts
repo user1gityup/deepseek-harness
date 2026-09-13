@@ -7,6 +7,9 @@ export type BudgetKey =
   | 'seats.metered'
   | 'seats.free'
   | 'seats.subscription'
+  | 'seats.model'
+  | 'seats.modelAuto'
+  | 'seats.modelDefault'
   | 'capacity.title'
   | 'capacity.perRun'
   | 'capacity.runsMonth'
@@ -64,6 +67,7 @@ export type BudgetKey =
   | 'pipeline.resumeNow'
   | 'pipeline.presets'
   | 'pipeline.restart'
+  | 'pipeline.stop'
   | 'pipeline.placeholder'
   | 'pipeline.minimize'
   | 'pipeline.expand'
@@ -85,6 +89,9 @@ export const en: Record<BudgetKey, string> = {
   'seats.metered': 'metered',
   'seats.free': 'free',
   'seats.subscription': 'subscription',
+  'seats.model': 'model',
+  'seats.modelAuto': 'Rolling free (auto-routed)',
+  'seats.modelDefault': 'Codex default (config.toml)',
   'capacity.title': 'Capacity',
   'capacity.perRun': 'Est. cost per full run',
   'capacity.runsMonth': 'Runs per month at budget',
@@ -127,6 +134,7 @@ export const en: Record<BudgetKey, string> = {
   'pipeline.resumeNow': 'Resume now',
   'pipeline.presets': 'Saved runs',
   'pipeline.restart': 'Start over',
+  'pipeline.stop': 'Stop run',
   'pipeline.failed': 'The prompt did not reach the session — nothing was sent. Reason:',
   'pipeline.placeholder': 'What should the chain work on?',
   'pipeline.minimize': 'Minimize',
@@ -162,6 +170,9 @@ export const zh: Record<BudgetKey, string> = {
   'seats.metered': '按量计费',
   'seats.free': '免费',
   'seats.subscription': '订阅制',
+  'seats.model': '模型',
+  'seats.modelAuto': '免费轮换（自动路由）',
+  'seats.modelDefault': 'Codex 默认（config.toml）',
   'capacity.title': '容量',
   'capacity.perRun': '每次完整运行的预估成本',
   'capacity.runsMonth': '按预算每月可运行次数',
@@ -204,6 +215,7 @@ export const zh: Record<BudgetKey, string> = {
   'pipeline.resumeNow': '立即恢复',
   'pipeline.presets': '已保存的运行',
   'pipeline.restart': '重新开始',
+  'pipeline.stop': '停止运行',
   'pipeline.failed': '提示未送达会话 — 未发送任何内容。原因：',
   'pipeline.placeholder': '这条链要处理什么？',
   'pipeline.minimize': '最小化',

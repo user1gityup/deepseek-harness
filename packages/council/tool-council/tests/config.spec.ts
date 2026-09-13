@@ -91,6 +91,11 @@ describe('auto-approve', () => {
     })).not.toThrow()
   })
 
+  it('accepts the id of a run stopped from the panel', () => {
+    expect((Config({ pipelineStoppedId: 'p1' }) as Record<string, unknown>)['pipelineStoppedId']).toBe('p1')
+    expect((Config({}) as Record<string, unknown>)['pipelineStoppedId']).toBeUndefined()
+  })
+
   it('starts with no run and no hold, so nothing resumes on a fresh install', () => {
     const resolved = Config({}) as Record<string, unknown>
     expect(resolved['pipelineId']).toBeUndefined()

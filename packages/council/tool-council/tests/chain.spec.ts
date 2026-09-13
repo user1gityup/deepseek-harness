@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { detectQuotaHold, holdElapsed, holdRemaining, isQuotaExhausted, DEFAULT_HOLD_MS } from '../src/quota-hold.ts'
-import { BUILD_PIPELINE_STAGES, nextStage, parseStages, runPipeline, stagesOf, startPipeline } from '../src/pipeline.ts'
+import { BUILD_PIPELINE_STAGES, nextStage, parseStages, runPipeline, stagesOf, startPipeline, stoppedDuring } from '../src/pipeline.ts'
 import type { PipelineState, StageOutput } from '../src/pipeline.ts'
 
 /** A fixed clock, so a stated reset time resolves the same way every run. */
@@ -349,5 +349,15 @@ describe('runPipeline', () => {
     const out = await runPipeline({ state: startPipeline('p1', 'q'), runStage: stage.runStage, now: NOW })
     expect(out.phase).toBe('blocked')
     expect(out.report).toContain('No seat is switched on')
+  })
+})
+
+describe('stoppedDuring', () => {
+  it('skips the write-back only for the run the panel stopped', () => {
+    expect(stoppedDuring('run-1', 'run-1')).toBe(true)
+    expect(stoppedDuring('run-2', 'run-1')).toBe(false)
+    expect(stoppedDuring('run-1', undefined)).toBe(false)
+    expect(stoppedDuring('run-1', '')).toBe(false)
+    expect(stoppedDuring('', '')).toBe(false)
   })
 })

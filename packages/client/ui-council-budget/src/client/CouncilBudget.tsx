@@ -7,12 +7,12 @@
  * takes effect on the next run without a restart.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { ISessions, SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
-import { project, usd } from './capacity.ts'
-import type { PanelSeat, Price, Subscription } from './capacity.ts'
+import { freeChatModelIds, project, usd } from './capacity.ts'
+import type { ModelRow, PanelSeat, Price, Subscription } from './capacity.ts'
 import { seatsFrom } from './capacity.ts'
 import { NS } from './locales.ts'
 import css from './CouncilBudget.module.css'
@@ -31,6 +31,9 @@ const KEY_STORAGE = 'dsh:openrouter-monitor:api-key'
 
 /** The council's tools, listed so they can be seen and switched off. */
 const TOOLS = ['council', 'swarm', 'council_capacity', 'memory_write', 'memory_recall', 'memory_forget'] as const
+
+/** The OpenRouter free proxy's rotating route; any other model id pins one model. */
+const PROXY_AUTO = 'proxy-auto'
 
 /** Fold the harness's own session projections into observed work. */
 function useObserved(sessions: ISessions): { outputTokens: number; inputTokens: number; sessions: number } {
@@ -63,6 +66,7 @@ export function CouncilBudget({ wide, t, sessions, settings }: CouncilBudgetProp
   const [open, setOpen] = useState(false)
   const [panelBottom, setPanelBottom] = useState(0)
   const [pricing, setPricing] = useState<ReadonlyMap<string, Price>>(new Map())
+  const [freeModels, setFreeModels] = useState<readonly string[]>([])
   const [remaining, setRemaining] = useState<number | undefined>(undefined)
   const [draftModel, setDraftModel] = useState('')
   const [draftName, setDraftName] = useState('')
@@ -98,7 +102,8 @@ export function CouncilBudget({ wide, t, sessions, settings }: CouncilBudgetProp
       try {
         const response = await fetch('https://openrouter.ai/api/v1/models', { signal: ac.signal })
         if (response.ok) {
-          const body = await response.json() as { data?: readonly { id?: string; pricing?: { prompt?: string; completion?: string } }[] }
+          const body = await response.json() as { data?: readonly ModelRow[] }
+          setFreeModels(freeChatModelIds(body.data ?? []))
           const table = new Map<string, Price>()
           for (const row of body.data ?? []) {
             if (typeof row.id !== 'string') continue
@@ -155,6 +160,33 @@ export function CouncilBudget({ wide, t, sessions, settings }: CouncilBudgetProp
   const toggleSeat = useCallback((seat: PanelSeat) => {
     const overrides = { ...(section?.['seats'] ?? {}) } as Record<string, { enabled?: boolean }>
     overrides[seat.id] = { ...overrides[seat.id], enabled: !seat.enabled }
+    void settings.set('seats', overrides)
+  }, [section, settings])
+
+  const codexModels = useMemo(
+    () => (Array.isArray(section?.['codexModels']) ? section['codexModels'] : [])
+      .filter((id): id is string => typeof id === 'string' && id !== ''),
+    [section],
+  )
+
+  /**
+   * The model choices a seat offers, or undefined for a seat with a fixed model.
+   * `value` is what the select shows; empty stands for the seat's default.
+   */
+  const modelChoices = (seat: PanelSeat): { value: string; fallback: string; ids: readonly string[] } | undefined => {
+    if (seat.id === 'openrouter-free') {
+      const value = seat.model === undefined || seat.model === PROXY_AUTO ? '' : seat.model
+      return { value, fallback: t('seats.modelAuto'), ids: freeModels }
+    }
+    if (seat.id === 'openai') {
+      return { value: seat.model ?? '', fallback: t('seats.modelDefault'), ids: codexModels }
+    }
+    return undefined
+  }
+
+  const setSeatModel = useCallback((seat: PanelSeat, model: string) => {
+    const overrides = { ...(section?.['seats'] ?? {}) } as Record<string, { model?: string }>
+    overrides[seat.id] = { ...overrides[seat.id], model }
     void settings.set('seats', overrides)
   }, [section, settings])
 
@@ -248,29 +280,49 @@ export function CouncilBudget({ wide, t, sessions, settings }: CouncilBudgetProp
 
           <div className={css.section}>
             <div className={css.sectionHead}>{t('seats.title')}</div>
-            {seats.map(seat => (
-              <label key={seat.id} className={css.row}>
-                <input type="checkbox" checked={seat.enabled} onChange={() => { toggleSeat(seat) }} />
-                <span className={css.rowName}>{seat.name}</span>
-                <span className={css.rowMeta}>
-                  {seat.free === true
-                    ? t('seats.free')
-                    : seat.transport === 'openrouter'
-                      ? t('seats.metered')
-                      : projection.subscriptionRate === undefined ? t('seats.subscription') : t('seats.subPriced')}
-                </span>
-                {isExtra(seat.id) ? (
-                  <button
-                    type="button"
-                    className={css.removeBtn}
-                    title={t('add.remove')}
-                    onClick={(event) => { event.preventDefault(); removeSeat(seat.id) }}
-                  >
+            {seats.map((seat) => {
+              const choices = modelChoices(seat)
+              return (
+                <Fragment key={seat.id}>
+                  <label className={css.row}>
+                    <input type="checkbox" checked={seat.enabled} onChange={() => { toggleSeat(seat) }} />
+                    <span className={css.rowName}>{seat.name}</span>
+                    <span className={css.rowMeta}>
+                      {seat.free === true
+                        ? t('seats.free')
+                        : seat.transport === 'openrouter'
+                          ? t('seats.metered')
+                          : projection.subscriptionRate === undefined ? t('seats.subscription') : t('seats.subPriced')}
+                    </span>
+                    {isExtra(seat.id) ? (
+                      <button
+                        type="button"
+                        className={css.removeBtn}
+                        title={t('add.remove')}
+                        onClick={(event) => { event.preventDefault(); removeSeat(seat.id) }}
+                      >
                     ×
-                  </button>
-                ) : null}
-              </label>
-            ))}
+                      </button>
+                    ) : null}
+                  </label>
+                  {choices === undefined ? null : (
+                    <div className={css.modelRow}>
+                      <select
+                        className={css.modelSelect}
+                        aria-label={`${seat.name} ${t('seats.model')}`}
+                        value={choices.value}
+                        onChange={(event) => { setSeatModel(seat, event.target.value) }}
+                      >
+                        <option value="">{choices.fallback}</option>
+                        {/* A saved model still shows before its list has loaded. */}
+                        {(choices.value === '' || choices.ids.includes(choices.value) ? choices.ids : [choices.value, ...choices.ids])
+                          .map(id => <option key={id} value={id}>{id}</option>)}
+                      </select>
+                    </div>
+                  )}
+                </Fragment>
+              )
+            })}
 
             <div className={css.addRow}>
               <input

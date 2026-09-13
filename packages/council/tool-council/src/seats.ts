@@ -12,6 +12,7 @@
 import { spawn } from 'node:child_process'
 import { connect } from 'node:net'
 import { describeError } from './errors.ts'
+import { recallReply, recordReply } from './journal.ts'
 import { mkdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -79,8 +80,19 @@ export interface SeatConfig {
    * own subscription.
    */
   readonly env?: Readonly<Record<string, string>> | undefined
-  /** For `openrouter`: the model identifier to request. */
+  /**
+   * The model identifier to request. For `openrouter` it is the request's
+   * `model` field; for `cli` it is passed through {@link modelFlag}, and is
+   * ignored by a CLI seat that declares no flag.
+   */
   readonly model?: string | undefined
+  /**
+   * For `cli`: the flag that selects the CLI's model, e.g. `-m` for
+   * `codex exec`. When set and {@link model} is non-empty, the flag and model
+   * go in front of the prompt entry; with no model the CLI uses its own
+   * configured default.
+   */
+  readonly modelFlag?: string | undefined
   /**
    * For `openrouter`: chat-completions endpoint, overriding OpenRouter's own.
    *
@@ -229,6 +241,9 @@ export const DEFAULT_SEATS: readonly SeatConfig[] = [
     args: ['exec', '{prompt}'],
     // `codex exec -` reads the prompt from stdin.
     stdinPromptArg: '-',
+    // No model by default: codex then uses the model in ~/.codex/config.toml.
+    // Choosing one in the council panel sets `model`, sent as `-m`.
+    modelFlag: '-m',
     enabled: true,
   },
   {
@@ -579,6 +594,22 @@ function stdinArgv(
 }
 
 /**
+ * Put a CLI seat's chosen model in front of its prompt entry.
+ *
+ * In front of the prompt rather than after it, so the flag lands among the
+ * subcommand's options whichever channel the prompt then travels on.
+ * @param template - the seat's argv template.
+ * @param seat - the seat, for its model and model flag.
+ * @returns the template with `[modelFlag, model]` inserted, or unchanged.
+ */
+export function withModelFlag(template: readonly string[], seat: SeatConfig): readonly string[] {
+  if (seat.modelFlag === undefined || seat.model === undefined || seat.model === '') return template
+  const pair = [seat.modelFlag, seat.model]
+  const at = template.indexOf('{prompt}')
+  return at === -1 ? [...template, ...pair] : [...template.slice(0, at), ...pair, ...template.slice(at)]
+}
+
+/**
  * Ask a CLI-backed seat, trying each platform candidate until one starts.
  *
  * A missing executable is reported as a seat failure rather than thrown: one
@@ -601,7 +632,7 @@ export async function askCliSeat(
   if (command === undefined || command === '') {
     return { seat: seat.id, text: '', error: 'no command configured', ms: 0 }
   }
-  const template = seat.args ?? ['{prompt}']
+  const template = withModelFlag(seat.args ?? ['{prompt}'], seat)
   const base = template.map(entry => (entry === '{prompt}' ? prompt : entry))
   // A CLI that can read a context file gets one; the digest never enters the
   // prompt for those seats, so shared memory costs no prompt construction.
@@ -1006,7 +1037,27 @@ async function readSseStream(response: Response, stall: AbortController, idleMs:
  * @param timeoutMs - hard cap per seat.
  * @returns the seat's reply or its failure.
  */
-export function askSeat(
+export async function askSeat(
+  seat: SeatConfig,
+  prompt: string,
+  apiKey: string | undefined,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  memory?: { file?: string | undefined; text?: string | undefined } | undefined,
+  webMaxResults?: number | undefined,
+): Promise<SeatReply> {
+  // A stage resumed after an abort already holds this answer: hand it back
+  // rather than ask, and pay, again. Outside a pipeline stage nothing is in
+  // scope and every call goes to the seat.
+  const recalled = recallReply(seat, prompt)
+  if (recalled !== undefined) return recalled
+  const reply = await askSeatOnce(seat, prompt, apiKey, signal, timeoutMs, memory, webMaxResults)
+  recordReply(seat, prompt, reply)
+  return reply
+}
+
+/** {@link askSeat} without the journal. */
+function askSeatOnce(
   seat: SeatConfig,
   prompt: string,
   apiKey: string | undefined,
